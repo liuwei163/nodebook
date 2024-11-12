@@ -1,0 +1,59 @@
+apiVersion: v1                # 资源类型 kubectl  api-resources:可以获取到所有资源 和 资源的版本
+kind: Pod                     # 同一个资源可能有很多的版本。
+metadata:                     # 每一个资源定义一些元数据信息
+  name: "mynginx1"            # 指定pod的名称
+  namespace: default          # 指定pod所属名称空间
+  labels:               
+    app: "mynginx1"   # 设置pod标签的 键值对
+spec:
+  imagePullSecrets:           # 指定镜像的下载密钥
+    - name: my-aliyun               # 这是kubectl  create  secrete  创建的pod名称
+    - name: key-02
+  containers:
+  - name: mynginx1
+    image: "nginx:1.9"
+    imagePullPolicy: Always  #
+  - env:                                #设置环境变量，并且在下面可以用变量的方式调用 
+    - name: MYSQL_ROOT_PASSWORD
+      volue: "123.com"
+    - name: zhangsan
+      volue: "boy"
+  
+  - name: mynginx2
+    image:  registry.cn-hangzhou.aliyuncs.com/lfy/java-devops-demo:v1.0                        #  "个人私有仓库地址ip或域名/liuwei/镜像名称:版本号  使用私有仓库需要创建镜像下载密钥pod"
+    imagePullPolicy: Always 
+  
+  - name: my-command-test
+    image: "nginx:1.9"
+    command:             # 容器的启动命令以这里为准。
+      - /bin/sh
+      - -c
+      - "echo ${msg};sleep 3600"
+      - -name: msg
+        value: "hello msg"
+    # 直接覆盖容器的默认命令，Dockerfile  ENTRYPOINT  CMD 指定容器的启动命令
+
+    resources:
+      limits:
+        cpu: 200m
+        memory: 500Mi
+      requests:
+        cpu: 100m
+        memory: 200Mi
+    env:
+    - name: DB_HOST
+      valueFrom:
+        configMapKeyRef:
+          name: mynginx1
+          key: DB_HOST
+    ports:
+    - containerPort:  80
+      name:  http
+    volumeMounts:
+    - name: localtime
+      mountPath: /etc/localtime
+  volumes:
+    - name: localtime
+      hostPath:
+        path: /usr/share/zoneinfo/Asia/Shanghai
+  restartPolicy: Always
