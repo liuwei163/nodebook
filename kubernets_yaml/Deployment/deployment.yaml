@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name:  nginx-dpl
+  namespace: default
+  labels:
+    app:  nginx-dpl
+spec:  # 我们期望的目标状态
+  strategy:               # 设置更新策略，拥有两种更新策略
+   # type: Recreate       # Recreate：全部杀死旧pod，创建新pod  
+    type: rollingUpdate   # 指定滚动更新的策略，可设置百分比和数字
+    rollingUpdate:
+       maxUnavailable: 2  # pod的最大不可用数量
+       maxSurge: 20%      # pod的最大增量
+  paused: true    # true为暂停部署/false为继续部署
+  revisionHistoryLimit: 15       # 保留最近更新的15个版本记录
+  progressDeadlineSeconds: 600   # deployment需要在规定的时间内部署完成
+  selector:        # 选择器
+    matchLabels:   # 匹配标签
+      app: pppp   # 标签的键值对 #和模板template里面的pod的标签必须一样
+  replicas: 10  # 10个副本数
+  template:          # 代表我们这次部署什么pod模板，pod文档的写法！！！
+    metadata:      # Pod的匹配标签
+      labels:
+        pod-name:  pppp   
+    spec:
+      containers:
+      - name:  nginx01
+        image:  nginx
+        
