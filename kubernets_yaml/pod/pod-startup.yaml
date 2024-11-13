@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "nginx-start"
+  namespace: default
+  labels:
+    app: "nginx-start"
+spec:
+  containers:
+  - name: nginx-start
+    image: "nginx:1.7"
+    imagePullPolicy: IfNotPresent
+    resources:
+      limits:
+        cpu: 200m
+        memory: 500Mi
+      requests:
+        cpu: 100m
+        memory: 200M
+    ports:
+    - containerPort:  80
+      name:  http
+
+    startupProbe:      # 容器启动探针
+      exec:              # 查看所在路径下是否有abc.html文件（有则正常启动容器，无则根据策略重启）
+        command: ["/bin/sh","-c","cat /usr/share/nginx/html/abc.html"]
+      periodSeconds: 5
+      timeoutSeconds: 5
+      successThreshold: 1
+      failureThreshold: 3
+
+    volumeMounts:
+    - name: nginx-html
+      mountPath: /usr/share/nginx/html
+  volumes:
+    - name: nginx-html
+      hostPath:
+        path: /data/nginx
+  restartPolicy: Always
+
+
+      # initialDelaySeconds: 5 # 指定5秒后才开始探测
+      # periodSeconds: 5       # 每隔几秒来运行这个
+      # timeoutSeconds: 5      # 探测超时，到了超时时间探测还没返回结果说明失败
+      # successThreshold: 3    # 成功阈值，连续几次成功才算成功
+      # failureThreshold: 5    # 失败阈值，连续几次失败才算失败

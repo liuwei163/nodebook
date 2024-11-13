@@ -11,8 +11,8 @@ spec:
     - name: key-02
   containers:
   - name: mynginx1          # 容器1
-    image: "nginx:1.9"        # 指定使用的镜像
-    imagePullPolicy: Always   # 镜像下载策略
+    image: "nginx:1.9"           # 指定使用的镜像
+    imagePullPolicy: Always      # 镜像下载策略，（默认策略：Always ： 只会去下载镜像）
   - env:                                #设置环境变量，并且在下面可以用变量的方式调用 
     - name: MYSQL_ROOT_PASSWORD            # 变量名
       volue: "123.com"                     # 变量值
@@ -21,11 +21,11 @@ spec:
   
   - name: mynginx2          # 容器2
     image:  registry.cn-hangzhou.aliyuncs.com/lfy/java-devops-demo:v1.0                        #  "个人私有仓库地址ip或域名/liuwei/镜像名称:版本号  使用私有仓库需要创建镜像下载密钥pod"
-    imagePullPolicy: Always 
+    imagePullPolicy: IfNotPresent   # 优先使用本地镜像，本地无镜像则下载镜像    
   
   - name: my-command-test   # 容器3
     image: "nginx:1.9"
-    command:             # 容器的启动命令以这里为准。
+    command:             # 容器的启动命令将会以这里为准。
       - /bin/sh
       - -c
       - "echo ${msg};sleep 3600"
