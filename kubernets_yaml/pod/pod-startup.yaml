@@ -21,7 +21,7 @@ spec:
     - containerPort:  80
       name:  http
 
-    startupProbe:      # 容器启动探针
+    startupProbe:      # 设置容器启动探针
       exec:              # 查看所在路径下是否有abc.html文件（有则正常启动容器，无则根据策略重启）
         command: ["/bin/sh","-c","cat /usr/share/nginx/html/abc.html"]
       periodSeconds: 5
