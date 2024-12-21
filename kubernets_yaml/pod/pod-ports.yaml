@@ -1,0 +1,71 @@
+# ports的写法
+---
+## 基本写法
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+spec:
+  containers:
+  - name: my-container
+    image: my-image
+    ports:
+    - containerPort: 8080
+
+### 定义了一个名为my-pod的 Pod，其中包含一个名为my-container的容器，该容器暴露了一个containerPort为8080的端口
+### 可以通过访问容器ip加容器暴露端口的方式访问 
+
+---
+## 指定协议和主机端口
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+spec:
+  containers:
+  - name: my-container
+    image: my-image
+    ports:
+    - containerPort: 8080
+      protocol: TCP
+      hostPort: 80
+
+### 这里除了指定容器内部的containerPort为8080，还明确指定了协议为TCP，并将主机端口hostPort设置为80。这意味着外部可以通过主机的80端口访问到容器内的8080端口
+### 经测试无法通过宿主机ip加端口方式访问到容器内的端口服务
+---
+## 指定端口范围
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+spec:
+  containers:
+  - name: my-container
+    image: my-image
+    ports:
+    - containerPort: 8080
+    - containerPort: 8081
+      protocol: UDP
+
+### 此示例中，容器暴露了两个端口，分别是8080和8081，其中8081端口指定了协议为UDP
+
+---
+## 使用名称
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+spec:
+  containers:
+  - name: my-container
+    image: my-image
+    ports:
+    - name: http-port
+      containerPort: 8080
+      protocol: TCP
+    - name: https-port
+      containerPort: 8081
+      protocol: TCP
+
+### 这里为每个暴露的端口都指定了一个名称，分别为http-port和https-port，这在后续的服务配置或网络策略配置中可以更方便地引用这些端口
+### 比如可以引用与service、ingress资源、NetworkPolicy资源
