@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster-service-test2
+  namespace: default
+spec:
+  selector:
+    pod-name: nginx-nodeport  # 每一台机器都为这个service随机分配一个指定的端口 ，标签的键值对决定关联的deploy
+  type: NodePort          # 类型,当type为NodePort时，指定在每个节点上暴露的端口号，范围通常是 30000-32767。
+  ports:
+  - name: nginx2
+    protocol: TCP
+    port:       80   # service使用的端口
+    targetPort: 80   # pod 映射的端口
+    nodePort: 30002  # 映射到物理机器的端口，默认没有设置的情况下会在30000-32767
+
+### ports：定义服务暴露的端口列表。
+### port：服务在集群内部暴露的端口，其他Pod或服务可以通过该端口访问此服务。
+### targetPort：后端Pod上实际监听的端口，服务会将流量转发到这个端口上的Pod。
+### nodePort：当type为NodePort时，指定在每个节点上暴露的端口号，范围通常是 30000-32767。
+### protocol：端口使用的协议，通常是TCP或UDP。
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deploy-nodeport    # deployment的名称
+spec:
+  replicas: 2                    # 启动的副本数量
+  selector:                          # 设置标签
+    matchLabels:
+      pod-name: nginx-nodeport       ## 标签的键值对要和service的一样,才可以实现暴露端口
+  template:                      # pod模板
+    metadata:
+      labels:
+        pod-name: nginx-nodeport     ## 标签的键值对要和deploy的一样
+    spec:
+      containers:
+      - name: nginx-nodeport
+        image: nginx
+        imagePullPolicy: IfNotPresent
+        ports:                  # 设置容器映射端口
+        - containerPort: 80     # 设置容器映射端口为80

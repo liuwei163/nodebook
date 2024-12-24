@@ -1,4 +1,14 @@
 # ports的写法
+
+---
+## 常用方式nodeport
+
+
+
+
+
+
+
 ---
 ## 基本写法
 apiVersion: v1
