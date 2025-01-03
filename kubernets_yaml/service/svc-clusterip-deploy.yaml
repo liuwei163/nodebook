@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster-service-test
+  namespace: default
+spec:
+  selector:
+    pod-name: ngx1      # 标签的键值对，要和deployment中的一致，
+  # clusterIP: 10.99.211.201 # 手动指定service的ip ，# 不指定，默认自动分配一个IP给service
+  # clusterIP: None  # 不给service分配IP,(无头服务，配合statefulset使用)
+  type: ClusterIP
+  ports:   # - name 可以设置多个端口转发
+  - name: nginx
+    protocol: TCP
+    port: 8888     # service可以被访问的端口，可以不设置宿主机端口，默认随机分配一个
+    targetPort: 80   # pod被service访问的端口
+  - name: redis
+    protocol: TCP
+    port: 9999     # service可以被访问的端口
+    targetPort: 6379   # pod被service访问的端口
+    
+## Service 有IP，集群内任意位置使用 ServiceIP可以负载均衡到Pod
+
+## Service 没有IP，在别的k8s资源里面使用 service 名字当成域名访问
+#### service 名称访问只有集群内的pod或者集群内的其他资源才可以使用此方式
+#### service 名称访问将会直接访问pod的ip，所以这时映射的端口是无用的，此时会直接访问pod的ip和端口。
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name:  nginx2
+  namespace: default
+  labels:
+    name:  ngx1
+spec:  # 我们期望的目标状态
+  selector:        # 选择器
+    matchLabels:   # 匹配标签
+      pod-name: ngx1   # 标签的键值对 #和模板template里面的pod的标签必须一样
+  replicas: 2
+  template:          # 代表我们这次部署什么pod模板，pod文档的写法！！！
+    metadata:      
+      labels:        # Pod的匹配标签
+        pod-name: ngx1
+    spec:
+      containers:
+      - name:  nginxlw
+        image:  nginx:v1
+        imagePullPolicy: IfNotPresent
