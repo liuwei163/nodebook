@@ -4,7 +4,7 @@ metadata:
   name: cluster-service-test
   namespace: default
 spec:
-  selector:
+  selector:        # 选中一组pod进行转发
     pod-name: ngx1      # 标签的键值对，要和deployment中的一致，
   # clusterIP: 10.99.211.201 # 手动指定service的ip ，# 不指定，默认自动分配一个IP给service
   # clusterIP: None  # 不给service分配IP,(无头服务，配合statefulset使用)

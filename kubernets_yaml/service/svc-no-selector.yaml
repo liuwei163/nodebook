@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster-service-no-selector  # 要和下面的Endpoints同名，这样才能对标
+  namespace: default
+spec:           # 不选中pod，而在下面手动定义可以访问的Endpoint
+  type: ClusterIP
+  ports:
+  - name: nginx   # 和下面Endpoints中的 ports中的-name 要一致
+    port: 80          # 访问当前service的80
+    targetPort: 9376  # 派发给pod的80
+---
+
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: cluster-service-no-selector   # 和上面的service同名，这样才能对标
+  namespace: default
+subsets:        # service实际连接的pod的IP地址
+- addresses:
+  - ip: 10.244.36.115
+  - ip: 10.244.169.187
+  - ip: 110.242.68.66
+  ports:
+  - name: nginx  # 和上面service中的 ports中的-name 要一致
+    port: 80   # 这一组IP被访问的端口
+    protocol: TCP
