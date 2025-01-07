@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-externalname-test
+  namespace: default
+spec:
+  selector:
+    app: service-externalname-test
+  type: LoadBalancer  # 负载均衡器:开放给云平台，k8s自动请求云平台，分配一个负载均衡器

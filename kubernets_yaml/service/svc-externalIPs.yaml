@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-externalip
+  namespace: default
+spec:
+  selector:
+    pod-name: ngx1      # 标签的键值对，要和deployment中的一致，
+  ports:   # - name 可以设置多个端口转发
+  - name: nginx
+    protocol: TCP
+    port: 80     # service可以被访问的端口，可以不设置宿主机端口，默认随机分配一个
+    targetPort: 80   # pod被service访问的端口
+  externalIPs:   # 白名单
+    - 192.168.31.202
