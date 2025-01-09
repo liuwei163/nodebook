@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-session-test
+  namespace: default
+spec:
+  selector:
+    app: ngx1
+  type: NodePort
+  sessionAffinity: ClientIP   #  ClientIP/None 两种类型
+  sessionAffinityConfig:      #  具体配置只有在类型为clientip情况下才会生效
+    clientIP:
+      timeoutSeconds: 30     # 30秒内将同一个请求转发到同一个pod
+  ports:
+  - name: svc-session-test
+    protocol: TCP
+    port: 80
+    targetPort: 80
+    nodePort: 32223

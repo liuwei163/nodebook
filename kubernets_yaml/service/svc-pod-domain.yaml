@@ -1,0 +1,53 @@
+# 同一个service中的pod，可以使用pod的主机名称+service名称进行访问
+# 同一个namespeacs不同service中的pod，可以使用pod的主机名称+service名称进行访问
+# 不同namespeacs不同service中的pod，可以使用pod的主机名称+service名称+namespeacs名称可以访问
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: default-subdomain
+  namespace: default
+spec:
+  selector:
+    app: busybox
+  clusterIP: None
+  ports:
+  - name: bus  # 实际上不需要指定端口号
+    port: 1234
+    targetPort: 1234
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "busybox1"
+  namespace: default
+  labels:
+    app: "busybox"
+spec:
+  hostname: busybox-1           # 指定pod的主机名
+  subdomain: default-subdomain  # 必须与service名称一样
+  containers:
+  - name: bus-test
+    image: busybox:1.28
+    command:
+      - sleep
+      - "3600"
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "busybox2"
+  namespace: default
+  labels:
+    app: "busybox"
+spec:
+  hostname: busybox-2           # 指定pod的主机名
+  subdomain: default-subdomain  # 必须与service名称一样
+  containers:
+  - name: bus-test
+    image: busybox:1.28
+    command:
+      - sleep
+      - "3600"
