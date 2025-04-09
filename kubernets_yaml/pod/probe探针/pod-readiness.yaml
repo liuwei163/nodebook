@@ -1,3 +1,5 @@
+# 容器的就绪探针,主要用来检查容器是否准备好开始接收流量
+
 apiVersion: v1
 kind: Pod
 metadata:

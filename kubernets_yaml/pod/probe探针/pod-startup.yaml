@@ -1,3 +1,5 @@
+# 容器的启动探针,一次性成功探针
+
 apiVersion: v1
 kind: Pod
 metadata:

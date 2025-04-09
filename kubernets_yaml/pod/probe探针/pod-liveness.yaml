@@ -1,3 +1,5 @@
+# 容器的存活探针,循环检测容器是否存活，如果失败就自动重启容器
+
 apiVersion: v1
 kind: Pod
 metadata:

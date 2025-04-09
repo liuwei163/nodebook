@@ -1,0 +1,31 @@
+## 常用方式：用于在同一 Pod 内的不同容器之间的文件共享,**
+# 当Pod分配到Node上时，将会创建emptyDir，并且只要Node上的Pod一直运行，Volume就会一直存。
+# 当Pod(不管任何原因)从Node上被删除时，emptyDir也同时会删除，存储的数据也将永久删除。
+# ！！！注:删除容器不影啊emptyDir。
+
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: emptydir-pod
+  labels:
+    app: myapp
+spec:
+  volumes:
+  - name: storage
+    emptyDir: {}
+  containers:
+  - name: myapp1
+    image: nginx
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+    - name: storage
+      mountPath: /storage
+    command: ['sh', '-c', 'sleep 3600000']
+  - name: myapp2
+    image: nginx
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+    - name: storage
+      mountPath: /storage
+    command: ['sh', '-c', 'sleep 10000000']
