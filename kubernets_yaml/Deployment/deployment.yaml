@@ -1,3 +1,12 @@
+# 一个Deployment产生三个资源
+# deployment资源
+# replicaset资源
+# pod资源
+
+# deployment 控制RS，RS控制pod的副本数
+# ReplicaSet： 只提供了副本数量的控制功能
+
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
