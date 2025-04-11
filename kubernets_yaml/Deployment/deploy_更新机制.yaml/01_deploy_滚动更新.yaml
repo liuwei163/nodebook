@@ -1,0 +1,27 @@
+# # 触发滚动更新
+# 1.直接编辑yaml文件，
+1)将yaml文件中的image字段修改为更新后的镜像
+2)可以在yaml文件中添加下面两个字段，调整更新参数
+
+maxUnavailable：在更新过程中，允许不可用的 Pod 副本的最大数量。可以是一个绝对值，也可以是 Pod 总数的百分比。
+maxSurge：在更新过程中，允许超过期望 Pod 副本数的最大数量。同样可以是绝对值或百分比。
+
+# 2.使用命令行方式触发更新
+
+###   直接使用 kubectl set image 命令更新镜像
+####  kubectl set image deployment/nginx-deployment nginx=nginx:1.16.1
+
+# 3.查看更新
+
+# 监控滚动更新过程
+# kubectl rollout status deployment/nginx-deployment
+# kubectl describe deployment nginx-deploymen
+
+# 回滚滚动更新
+# kubectl rollout undo deployment/nginx-deployment
+
+# 如果你想回滚到指定的历史版本，可以先查看 Deployment 的历史版本：
+# kubectl rollout history deployment/nginx-deployment
+
+# 然后使用以下命令回滚到指定版本（这里的 2 是你要回滚到的版本号）
+# kubectl rollout undo deployment/nginx-deployment --to-revision=2

@@ -1,0 +1,56 @@
+# 滚动发布的缺点？（同时存在两个版本都能接受流量）
+
+# 1)不能控制更新时间
+# 2)滚动发布短时间直接结束，不能直接控制新老版本的存活时间
+
+*金丝雀的方式是使用labels标签来区别v1和v2版本，可以在v2版本稳定后，再删除v1版本。*
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name:  canary-nginx
+  namespace: default
+  labels:
+    app:  canary-deployv1
+spec:
+  selector:
+    matchLabels:
+      app: canary-nginx
+      v: v1
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app:  canary-nginx
+        v: v1
+    spec:
+      containers:
+      - name:  canary-nginx
+        image:  nginx
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name:  canary-nginx
+  namespace: default
+  labels:
+    app:  canary-deployv1
+spec:
+  selector:
+    matchLabels:
+      app: canary-nginx
+      v: v2
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app:  canary-nginx
+        v: v2
+    spec:
+      containers:
+      - name:  canary-nginx
+        image:  nginx  # 手动修改一下nginx的index.html文件内容，区别v1和v2
+        imagePullPolicy: IfNotPresent
