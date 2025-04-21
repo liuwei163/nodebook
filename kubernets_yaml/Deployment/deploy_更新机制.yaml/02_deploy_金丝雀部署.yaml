@@ -3,19 +3,39 @@
 # 1)不能控制更新时间
 # 2)滚动发布短时间直接结束，不能直接控制新老版本的存活时间
 
-*金丝雀的方式是使用labels标签来区别v1和v2版本，可以在v2版本稳定后，再删除v1版本。*
+*金丝雀(canary)的方式是使用labels标签来区别v1和v2版本，可以在v2版本稳定后，再删除v1版本。*
 
----
+
+
+--- # canary_service
+apiVersion: v1
+kind: Service
+metadata:
+  name: canary-test
+  namespace: default
+spec:
+  selector:
+    app:  canary-nginx
+  type: NodePort
+  ports:
+  - name: canary-test
+    protocol: TCP
+    port: 80
+    targetPort: 80  ## pod的访问端口
+    nodePort: 31666  ## 宿主机上开的端口，外部访问
+
+
+--- # v1 版本
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name:  canary-nginx
+  name:  canary-nginxv1
   namespace: default
   labels:
     app:  canary-deployv1
 spec:
   selector:
-    matchLabels:
+    matchLabels:          # 通过这个labels标签来区分v1 和v2
       app: canary-nginx
       v: v1
   replicas: 2
@@ -27,20 +47,21 @@ spec:
     spec:
       containers:
       - name:  canary-nginx
-        image:  nginx
+        image:  registry.cn-hangzhou.aliyuncs.com/lfy_k8s_images/nginx-test:env-msg
+        imagePullPolicy: IfNotPresent
 
 
----
+---  # v2版本
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name:  canary-nginx
+  name:  canary-nginxv2
   namespace: default
   labels:
-    app:  canary-deployv1
+    app:  canary-deployv2
 spec:
   selector:
-    matchLabels:
+    matchLabels:          # 通过这个labels标签来区分v1 和v2
       app: canary-nginx
       v: v2
   replicas: 2
