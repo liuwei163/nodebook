@@ -13,8 +13,8 @@
   #   - Statefulset通过与其相关的无头服务为每个pod提供DNS解析条目。假如无头服务的DNS条目为:
       #     - "$(service name).$(namespace).svc.cluster.local"
       #     - 那么pod的解析条目就是"$(pod name).$(service name).$(namespace).svc.cluster.local"，每个pod name也是唯一的。
-#   - 稳定的、持久的存储;【每个Pod始终对应各自的存储路径(PersistantVolumeClaimTemplate】
-      #     使用挂载请求，而非挂载路径
+#   稳定的、持久的存储;【每个Pod始终对应各自的存储路径(PersistantVolumeClaimTemplate】
+  #     使用挂载请求，而非挂载路径
       
 #   - 有序的、优雅的部署和缩放。【按顺序地增加副本、减少副本，并在减少副本时执行清理】
 #   - 有序的、自动的滚动更新。【按顺序自动地执行滚动更新】
