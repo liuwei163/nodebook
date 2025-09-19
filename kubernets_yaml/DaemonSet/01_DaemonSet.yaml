@@ -12,7 +12,7 @@
 # - 在每个节点上运行日志收集守护进程，例如 fluentd、logstash
 # - 在每个节点上运行监控守护进程，
 #   - 例如： Prometheus Node_Exporter、SysdigAgent、collectd、Dynatrace
-#     OneAgent、APPDynamicsAgent、 Datadog agent、 New Relic agent、Ganglia gmond、 Instana Agent 等
+#     OneAgent、APPDynamicsAgent、 Datadog agent、 New  Relic agent、Ganglia gmond、 Instana Agent 等
 
 
 ---
