@@ -1,0 +1,19 @@
+1.下载离线安装包
+https://developer.download.nvidia.com/compute/cuda/13.0.0/local_installers/cuda_13.0.0_580.65.06_linux.run
+这是下载链接
+
+2.执行这个，全程默认，install安装
+sh cuda_13.0.0_580.65.06_linux.run
+
+3.安装nvidia-docker，就用部署服务器源就可以 apt 下载即可
+
+apt-get install -y nvidia-container-toolkit
+nvidia-ctk runtime configure --runtime=docker
+
+4.然后配置gpu
+echo cgroups/cpu,cgroups/mem,filesystem/linux,cgroups/devices,gpu/nvidia > /etc/srm-slave/isolation
+systemctl stop srm-slave
+rm -rf /var/lib/srm/meta/slaves/*
+systemctl start srm-slave
+
+5.在控制节点 qhost 查看新加节点GPU是否可以查看到
