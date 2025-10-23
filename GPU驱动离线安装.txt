@@ -1,3 +1,7 @@
+在master节点查看集群机器的资源配置情况
+qhost
+qhost -vv # 查看npu资源
+
 1、## x86系统（ubuntu22.04）
 
 1.下载离线安装包
