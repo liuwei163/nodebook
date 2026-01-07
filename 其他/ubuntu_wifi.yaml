@@ -1,0 +1,15 @@
+network:
+  version: 2
+  wifis:
+    wlx70f11c4504fc:  # 具体的wifi名称
+      dhcp4: true
+      dhcp6: false
+      nameservers:
+        addresses: [192.168.99.11]
+      access-points:
+        BGI:
+          auth:
+            key-management: "eap"
+            method: "peap"
+            identity: "mgi_bp"
+            password: "mbp_MGI@2025d"

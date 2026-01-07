@@ -1,0 +1,32 @@
+##添加
+ceph fs add_data_pool annafs annafs_data2 --cluster xtao
+
+##查看文件系统里面的存储池
+ceph fs ls —cluster xtao
+
+##绑定
+setfattr -n ceph.dir.layout.pool -v annafs_data2 /dir_name
+只需要把dir_name  改成我创建的cold_data
+
+mount -t nfs4 -o vers=4.0 127.0.0.1:/  /mnt/liuwei
+
+
+
+#############################################################
+
+
+### 用fuse 客户端试试
+## 添加
+ceph fs add_data_pool annafs annafs_data2 --cluster xtao
+##查看文件系统里面的存储池
+ceph fs ls --cluster xtao
+
+# 创建挂载路径 /mnt/kk/
+mkdir /mnt/kk
+# 挂载小anna
+mount -t annafs xtao /mnt/kk
+# 绑定到创建的目录  /mnt/kk/cold_data
+setfattr -n ceph.dir.layout.pool -v cephfs_data2   /mnt/kk/cold_data
+
+# 检查是否正常
+getfattr -n ceph.dir.layout /mnt/kk/cold_data
