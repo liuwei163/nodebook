@@ -8,6 +8,9 @@
 	# 安装命令
 	sudo apt install ./bridge-utils_1.6-2ubuntu1_amd64.deb
 
+# docker镜像百度网盘地址：
+	通过网盘分享的文件vmlauncher.tbz
+	链接: https://pan.baidu.com/s/1ywENQileTkTLU4SvVZIabA?pwd=yu76 提取码: yu76
 
 1. 建网桥
 	# 查看网桥是否桥接到物理网口
@@ -41,7 +44,7 @@
 	virt-install --name deploy --ram=10240 --vcpus=2 --os-variant=ubuntu22.04 --disk /var/log/vm/deploy.qcow2,size=100 --disk /root/test.iso,device=cdrom --network bridge=vmarkbr0 --graphics vnc,listen=0.0.0.0 --boot hd,cdrom
 4. 使用vnclient 访问虚拟机
 	vncvierwer 192.168.12.200:5900
-
+##################################################################################################################################
 
 # 1. 创建虚拟网桥设备，命名为 vmarkbr0
 sudo brctl addbr vmarkbr0
