@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-externalname-test
+  namespace: default
+spec:
+  selector:
+    app: service-externalname-test
+  type: ExternalName    # 类型
+  externalName: www.baidu.com   ## 无selector,自己写EP。  只能写域名，不能写IP，web服务注意跨域问题。

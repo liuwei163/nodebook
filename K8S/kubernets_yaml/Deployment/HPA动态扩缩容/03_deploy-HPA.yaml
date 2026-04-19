@@ -1,0 +1,33 @@
+# 1. 命令行创建HPA： kubectl autoscale deployment php-apache --cpu-percent=50 --min=1 --max=10*
+
+
+# 2. yaml 文件写法
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  creationTimestamp: null
+  name: php-apache
+spec:
+  maxReplicas: 10               # 最多扩展pod数量
+  minReplicas: 1
+  scaleTargetRef:      			# 将要扩展的目前引用
+    apiVersion: apps/v1
+    kind: Deployment
+    name: php-apache             		# pod的limit:10  那超出5 即会开始扩容
+  targetCPUUtilizationPercentage: 50   ## cpu的使用率超过50%就扩容，低于50%，5分钟就开始缩容
+status:
+  currentReplicas: 0
+  desiredReplicas: 0
+
+
+### 增加php-apache的负载，查看是否会自动扩缩容
+
+# 1. 查看hpa中pod的资源使用率
+# kubectl  get  hpa
+
+# 2. 增加负载
+# k8s官网提供
+# kubectl run -i --tty load-generator --rm --image=busybox:1.28 --restart=Never -- /bin/sh -c "while sleep 0.01; do wget -q -O- http://php-apache; done"
+
+# 或者直接循环 访问svc的地址
+# while sleep 0.01; do curl  svc负载均衡IP地址; done
