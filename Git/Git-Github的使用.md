@@ -103,7 +103,22 @@ git clone  https://github.com/liuwei163/git-demo.git
 
 ```sh
 1)生成非对称密钥
-ssh-keygen -t rsa -C 2031260394@qq.com
-2)将生成的公钥文件(id_rsa.pub)内容添加到github的ssh密钥中即可
+ssh-keygen -t ed25519 -C 2031260394@qq.com      # 新版git使用
+
+ssh-keygen -t rsa -C 2031260394@qq.com          # 旧版不识别ed25519的使用这个rsa
+2)将生成的公钥文件(id_ed25519.pub)内容添加到github的ssh密钥中即可
+cat ~/.ssh/id_ed25519.pub
+
 ```
 
+8、电脑配置了系统代理的情况下，需要给git单独配置配置
+
+```
+git config --global http.proxy http://10.22.98.21:8080
+git config --global https.proxy http://10.22.98.21:8080
+# 企业内网增加关闭ssl校验（必备，很多内网代理会替换证书）
+git config --global http.sslVerify false
+# 查看配置
+git config --global --list
+
+```
