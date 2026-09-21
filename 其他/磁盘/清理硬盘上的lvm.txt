@@ -1,0 +1,42 @@
+以下是针对nvme0n1盘 LVM 的清理操作指令清单（操作前务必确认：目标 LVM 数据已备份 / 无需保留，且该 LVM 未被系统挂载使用）：
+前置检查（避免误操作）
+
+# 1. 检查目标LVM是否挂载
+mount | grep centos
+
+# 2. 检查swap是否启用
+swapon --show | grep centos
+
+步骤 1：卸载挂载点 + 关闭 swap
+# 卸载逻辑卷挂载点（根据前置检查结果填写实际路径）
+umount /dev/centos/root
+umount /dev/centos/home
+
+# 关闭centos对应的swap
+swapoff /dev/centos-swap
+
+步骤 2：删除逻辑卷（LV）
+# 删除centos卷组下的所有逻辑卷
+lvremove /dev/centos/root
+lvremove /dev/centos/home
+lvremove /dev/centos-swap
+
+步骤 3：删除卷组（VG）
+vgremove centos
+
+步骤 4：删除物理卷（PV）
+# 删除nvme0n1对应LVM的物理卷（截图中为nvme0n1p3）
+pvremove /dev/nvme0n1p3
+
+
+（可选）彻底清理磁盘分区 / 签名
+# 方式1：删除nvme0n1的分区（通过fdisk交互操作）
+fdisk /dev/nvme0n1
+# 执行后输入：
+# d → 选择要删除的分区（如1/2/3）→ 重复d删除所有分区 → w（保存修改）
+
+# 方式2：清除磁盘所有文件系统签名
+wipefs -a /dev/nvme0n1
+
+#####
+依次删除之后， 通过lvs, vgs, pvs确认已经没有了， 但如果像现在这样lsblk看还有lvm信息， 就执行：dmsetup remove /dev/mapper/mnt-storage    目的是让内核下线残留的dm设备
