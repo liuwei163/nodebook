@@ -1,0 +1,28 @@
+# 添加http
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: higress-gateway
+  namespace: higress-system
+spec:
+  gatewayClassName: higress
+  listeners:
+  - name: http
+    port: 80
+    protocol: HTTP
+    allowedRoutes:
+      namespaces:
+        from: All
+        # from: All  # 放开全集群所有命名空间路由挂载（当前启用）
+        # ========== 下面是Selector精细化白名单方案，默认注释不生效 ==========
+        # from: Selector
+        # selector:
+        #   matchLabels:
+        #     gateway-allow-higress: "true"
+        # 解释：
+        # 1. from: Selector 代表不再允许全部namespace，只匹配下面label筛选出来的ns
+        # 2. selector.matchLabels：命名空间必须带有 label gateway-allow-higress=true
+        # 3. 只有带这个label的namespace内创建的HTTPRoute，才能parentRef绑定到本listener
+        # 4. 使用方式：给业务命名空间打label
+        #    kubectl label namespace biz-ns gateway-allow-higress=true
+        #    kubectl label namespace monitoring gateway-allow-higress=true
