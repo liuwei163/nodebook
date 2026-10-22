@@ -1,0 +1,60 @@
+在master节点查看集群机器的资源配置情况
+qhost
+qhost -vv # 查看npu资源
+
+1、## x86系统（ubuntu22.04）
+
+1.下载离线安装包
+https://developer.download.nvidia.com/compute/cuda/13.0.0/local_installers/cuda_13.0.0_580.65.06_linux.run
+这是下载链接
+
+2.执行这个，（全程默认），选择install安装
+sh cuda_13.0.0_580.65.06_linux.run
+# 验证是否安装成功
+nvidia-smi
+3.安装nvidia-docker，就用部署服务器源就可以 apt 下载即可
+
+apt-get install -y nvidia-container-toolkit
+nvidia-ctk runtime configure --runtime=docker
+
+4.然后配置gpu
+echo cgroups/cpu,cgroups/mem,filesystem/linux,cgroups/devices,gpu/nvidia > /etc/srm-slave/isolation
+systemctl stop srm-slave
+rm -rf /var/lib/srm/meta/slaves/*
+systemctl start srm-slave
+
+5.在控制节点 qhost 查看新加节点GPU是否可以查看到
+
+2、## arm系统架构（麒麟）
+
+### 安装文档:
+https://support.huawei.com/enterprise/zh/doc/EDOC1100438837/f4a62e83
+
+1.安装驱动 （返回successfully 即成功，根据提示决定是否重启）
+rpm -ivh Ascend-hdk-310p-npu-driver-25.2.0-1.aarch64.rpm
+# 验证是否安装成功
+npu-smi info
+2.安装固件（返回successfully 即成功，根据提示决定是否重启）
+rpm -ivh Ascend-hdk-310p-npu-firmware-7.7.0.6.236-1.noarch.rpm
+
+
+3、##卸载.run的包安装的驱动
+
+对于使用 GDM/Gnome、LightDM 的系统（如 Ubuntu, Debian）
+systemctl stop gdm
+
+对于使用 SDDM 的系统（如 KDE Plasma）
+systemctl stop sddm
+
+禁用开源 Nouveau 驱动：
+echo -e "blacklist nouveau\noptions nouveau modeset=0" > /etc/modprobe.d/blacklist-nouveau.conf
+
+执行 NVIDIA 驱动的卸载脚本：
+/usr/bin/nvidia-uninstall
+
+按照屏幕提示确认卸载。这个脚本是 NVIDIA 官方安装包自带的，能最干净地移除驱动。
+如果找不到这个命令，你可以尝试运行新安装包附带的卸载功能（但通常推荐使用已安装的 nvidia-uninstall）：
+./NVIDIA-Linux-x86_64-xxx.xx.xx.run --uninstall
+
+可选）清理残留：卸载完成后，可以手动删除一些可能的残留文件（这不是必须的，但为了彻底）：
+rm -rf /etc/X11/xorg.conf
