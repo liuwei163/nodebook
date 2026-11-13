@@ -1,0 +1,281 @@
+# =============================================================================
+# MLflow 轻量部署（形态二：SQLite + NFS）—— 已在离线环境验证可跑通
+#
+# 适配环境：
+#   - 镜像已推到 harbor.ai.cnpc/ai-platform-poc/mlflow:v2.17.2
+#   - StorageClass 不支持动态供应，PV 手动创建、PVC 显式绑定
+#   - NFS 是 v3 协议（服务端只支持 vers=3，见 mountOptions）
+#   - 数据落在 NFS 共享，服务端路径见下方 PV
+#
+# ⚠ 关于 SQLite 放在 NFS 上：
+#   SQLite 官方不推荐把数据库文件放网络文件系统（文件锁不可靠）。
+#   但在"只有一个 MLflow server 实例、所有写操作都经过它"的前提下，
+#   实际只会有一个进程持有写锁，风险可控。
+#   必须做的两件事：
+#     1. replicas 恒为 1，strategy: Recreate（绝不允许两个 Pod 同时写）
+#     2. 定期备份 /data/mlflow.db
+#   如果哪天出现 "database is locked" 或数据异常，就是该换 PostgreSQL 的信号。
+#
+# ⚠ 关于 artifact 存储协议（重要认知）：
+#   只要客户端通过 HTTP（http://server:5000）连 MLflow server，
+#   artifact_uri 就【永远是】 mlflow-artifacts:/... 形式（代理模式），
+#   跟有没有 --default-artifact-root 无关。
+#   所谓 file:// 模式，指的是【不连 server、直接操作本地文件】的用法
+#   （mlflow.set_tracking_uri("file:///path")），二者不是"server 的两种配置"，
+#   而是"用 server"和"不用 server"两种完全不同的用法。
+#   所以登记已有模型时，source 必须用 mlflow-artifacts:/ 前缀，见文末说明。
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 【前置步骤，不在本文件里，需要手工执行】
+#
+# 1) 在 NFS 上建目录（在任意挂了 NFS 的节点上执行）
+#      mkdir -p /mnt/nfs-temp/mlflow
+#      chmod 777 /mnt/nfs-temp/mlflow
+#
+# 2) 把 Harbor 拉取凭据复制到新命名空间
+#    （Secret 是命名空间隔离的，kthena-system 里那个 ml-platform 用不了）
+#      kubectl get secret harbor-secret -n kthena-system -o json \
+#        | python3 -c "import sys,json;d=json.load(sys.stdin);d['metadata']={'name':'harbor-secret','namespace':'ml-platform'};print(json.dumps(d))" \
+#        | kubectl apply -f -
+#
+# 3) 先建命名空间（如果在复制 Secret 之前执行，把 ns 和 secret 顺序调换）
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml-platform
+---
+# ---------------------------------------------------------------------------
+# PV：手动创建，因为 nfs-sc 没有动态供应器
+#
+# server/path 是 NFS 服务端的真实路径，不是客户端挂载点：
+#   客户端看到 /mnt/nfs-temp  →  服务端 /mnt/Volume_03/manila/share_xxx
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mlflow-data-pv
+spec:
+  capacity:
+    # 必须 ≥ PVC 请求的容量，否则绑不上
+    storage: 50Gi
+  accessModes:
+    - ReadWriteMany
+  # Retain：删除 PVC 时保留 NFS 上的数据，防止误删实验记录
+  persistentVolumeReclaimPolicy: Retain
+  # 必须和 PVC 的 storageClassName 完全一致
+  storageClassName: nfs-sc
+  nfs:
+    server: v4nassg02.v4hhht03.az1
+    path: /mnt/Volume_03/manila/share_a30f1d66_5d66_48f3_9afa/mlflow
+  mountOptions:
+    # 服务端只支持 NFSv3（用 mount 命令查过是 vers=3），不是 4.1
+    - vers=3
+    # nolock：服务端没开 NLM 网络锁，宿主机也是这么挂的，不加会卡住
+    - nolock
+    # 注意：不要加 rsize/wsize/hard/timeo/retrans/noresvport 那一堆参数，
+    # 实测加上反而触发服务端 "access denied by server"。
+    # 照抄同集群里 dolphinscheduler 的 PV 配置（vers=3 + nolock）就能通。
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow-data
+  namespace: ml-platform
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-sc
+  # 显式绑定到上面那个 PV，避免 SC 不自动匹配导致 PVC 一直 Pending
+  volumeName: mlflow-data-pv
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: ml-platform
+spec:
+  # 恒为 1。SQLite 不支持多进程写，多副本会损坏数据库
+  replicas: 1
+  # Recreate 而不是 RollingUpdate：保证更新时先杀旧 Pod 再起新的，
+  # 不会出现两个实例短暂共存抢同一个 db 文件
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+      # 【监控新增①】Prometheus 抓取注解：Pod 带 prometheus.io/scrape=true 时，
+      # Operator 内置的 kubernetes-pods 服务发现会自动来抓 prometheus.io/port 指的 9110
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9110"
+    spec:
+      # Harbor 私有项目需要拉取凭据（Secret 需先复制到本命名空间）
+      imagePullSecrets:
+        - name: harbor-secret
+      containers:
+        - name: mlflow
+          image: harbor.ai.cnpc/ai-platform-poc/mlflow:v2.17.2
+          imagePullPolicy: IfNotPresent
+          command: ["mlflow"]
+          args:
+            # 启动 tracking server（ui 是本地单机模式，不能多客户端连）
+            - "server"
+            - "--host=0.0.0.0"
+            - "--port=5000"
+
+            # 【后端存储】元数据：实验、run、参数、指标、模型版本记录
+            # 四个斜杠 = sqlite:/// + 绝对路径 /data/mlflow.db
+            - "--backend-store-uri=sqlite:////data/mlflow.db"
+
+            # 【产物存储】实体文件：模型、图表、报告
+            # ⚠ 2026-11-06 勘误（之前理解有误，训练产物落在了容器本地盘）：
+            #   `mlflow server` 2.x 默认就开启 --serve-artifacts（无需显式加）。
+            #   代理模式下 --default-artifact-root 会被【忽略】，实际写入位置
+            #   由 --artifacts-destination 决定，默认值 ./mlartifacts 是相对
+            #   server 进程工作目录的容器本地路径——Pod 一重启就丢，NFS 也看不到。
+            #   因此必须显式指定 --artifacts-destination=/data/artifacts，
+            #   让 mlflow-artifacts:/<exp_id>/<run_id>/... 落到挂载 NFS 的目录。
+            - "--artifacts-destination=/data/artifacts"
+
+            # 注意两点（都是踩过的坑）：
+            # 1. 不要加 --allowed-hosts：那是 2.18+ 的参数，2.17.2 会
+            #    直接报 "No such option" 退出容器。
+            # 2. 旧配置 --default-artifact-root=/data/artifacts 已删除：
+            #    它在代理模式下被忽略，曾让人误以为产物会写进 NFS。
+            #    /data/artifacts/0/ 下两个旧占位目录是当时手动 mkdir 的，保留不动。
+
+          ports:
+            - name: http
+              containerPort: 5000
+          env:
+            # 关掉匿名遥测（离线环境必须，否则每次请求都尝试联网超时）
+            - name: DO_NOT_TRACK
+              value: "true"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+
+        # ---------------------------------------------------------------
+        # 【监控新增②】监控导出器 sidecar（纯标准库，见 03-监控接入/03-mlflow-exporter.py）
+        # 指标端口 9110：mlflow_up / 磁盘水位 / 实验·run·模型版本计数
+        # 与主容器共享 /data（statvfs 量磁盘 + 只读模式查 sqlite 计数）
+        # 脚本本体在 ConfigMap 里（见 03-监控接入/03-mlflow-exporter-configmap.yaml），此处只挂载
+        # ---------------------------------------------------------------
+        - name: exporter
+          image: harbor.ai.cnpc/ai-platform-poc/mlflow:v2.17.2
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/opt/mlflow-exporter/mlflow-exporter.py"]
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: "http://127.0.0.1:5000"
+          ports:
+            - name: metrics
+              containerPort: 9110
+          resources:
+            requests:
+              cpu: "50m"
+              memory: 64Mi
+            limits:
+              cpu: "200m"
+              memory: 128Mi
+          volumeMounts:
+            - name: exporter-script
+              mountPath: /opt/mlflow-exporter
+            - name: data
+              mountPath: /data
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mlflow-data
+        # 【监控新增③】exporter 脚本从 ConfigMap 挂载（必须先 apply
+        # 03-监控接入/03-mlflow-exporter-configmap.yaml，否则 Pod 起不来卡 CreateContainerConfigError）
+        - name: exporter-script
+          configMap:
+            name: mlflow-exporter
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: ml-platform
+spec:
+  type: ClusterIP
+  selector:
+    app: mlflow
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+
+# =============================================================================
+# 【登记已有模型到注册表】完整流程（已验证可跑通）
+#
+# 背景：MLflow 的 Model Registry 要求模型版本必须来自某个 run 的 artifact 目录，
+#       对"登记 NFS 上已有的模型"不友好。以下流程用"占位 run + 代理协议 source"
+#       绕开校验，真实路径记在 storage_path tag 里。
+#
+# 1) 建占位 run（Default 实验 id=0）
+#    curl -X POST http://127.0.0.1:5000/api/2.0/mlflow/runs/create \
+#      -H 'Content-Type: application/json' \
+#      -d '{"experiment_id":"0","start_time":1793757141585}'
+#    → 记下返回里的 run_id
+#
+# 2) 在 run 的 artifact 目录建占位子目录（目录名 = 模型名）
+#    kubectl -n ml-platform exec deploy/mlflow -- mkdir -p \
+#      /data/artifacts/0/<run_id>/artifacts/<模型名>
+#
+# 3) 建模型条目（已存在会报 RESOURCE_ALREADY_EXISTS，属正常）
+#    curl -X POST http://127.0.0.1:5000/api/2.0/mlflow/registered-models/create \
+#      -H 'Content-Type: application/json' -d '{"name":"<模型名>"}'
+#
+# 4) 注册版本（source 必须用 mlflow-artifacts:/ 前缀）
+#    curl -X POST http://127.0.0.1:5000/api/2.0/mlflow/model-versions/create \
+#      -H 'Content-Type: application/json' -d '{
+#        "name": "<模型名>",
+#        "source": "mlflow-artifacts:/0/<run_id>/artifacts/<模型名>",
+#        "run_id": "<run_id>",
+#        "description": "BF16 基座",
+#        "tags": [{"key":"storage_path","value":"/mnt/nfs-temp/models/<模型名>"}]
+#      }'
+#
+# 5) 标记生产版本（可选）
+#    curl -X POST http://127.0.0.1:5000/api/2.0/mlflow/model-versions/transition-stage \
+#      -H 'Content-Type: application/json' \
+#      -d '{"name":"<模型名>","version":"1","stage":"Production"}'
+#
+# 关键要点：
+#   - source 一定要带 mlflow-artifacts:/ 前缀，填 /data/... 或 file:///... 都会被拒
+#   - 真实 NFS 路径记在 storage_path tag 里，因为 source 字段记的是代理协议路径
+#   - 这套用法是"逆着 MLflow 设计硬走"，能用但不优雅；
+#     等有真正的训练流程时，用 mlflow.log_model() 训练完直接注册会顺很多
+# =============================================================================

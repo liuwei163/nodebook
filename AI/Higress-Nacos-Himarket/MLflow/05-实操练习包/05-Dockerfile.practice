@@ -1,0 +1,33 @@
+# =============================================================================
+# MLflow 练习/训练客户端镜像：mlflow 官方镜像 + 训练库
+#
+# 角色划分（重要）：
+#   - MLflow 服务端（集群里已在跑的 mlflow:v2.17.2）= 记账员，不需要训练库，永不改动
+#   - 本镜像 = 训练客户端，训练脚本在哪个 Pod 里跑，库就得在这个镜像里
+#
+# 构建命令见同目录《05-Docker镜像打包完整流程.md》
+# =============================================================================
+
+# 底座默认用 Harbor 里已有的镜像（Harbor 可达的机器直接构建）；
+# 纯外网机器构建时加参数：--build-arg BASE=ghcr.io/mlflow/mlflow:v2.17.2
+ARG BASE=harbor.ai.cnpc/ai-platform-poc/mlflow:v2.17.2
+FROM ${BASE}
+
+# ---- 版本锁定（兼容镜像内 Python 3.9~3.12；若底座是 3.8 见流程文档降版说明）----
+ARG SKLEARN_VERSION=1.5.2
+ARG MATPLOTLIB_VERSION=3.9.2
+# ---- pip 源（国内构建机加速用：--build-arg PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple）----
+ARG PIP_INDEX=https://pypi.org/simple
+
+LABEL maintainer="ops" \
+      description="MLflow 2.17.2 client + scikit-learn training image (practice/CI)" \
+      org.opencontainers.image.source="05-实操练习包/05-Dockerfile.practice"
+
+RUN pip install --no-cache-dir \
+      -i ${PIP_INDEX} \
+      "scikit-learn==${SKLEARN_VERSION}" \
+      "matplotlib==${MATPLOTLIB_VERSION}"
+
+# ---- 构建期自检：三个关键库 import 不通过则构建直接失败，避免坏镜像进 Harbor ----
+RUN python -c "import mlflow, sklearn, matplotlib; \
+print('client-image-ok | mlflow', mlflow.__version__, '| sklearn', sklearn.__version__, '| matplotlib', matplotlib.__version__)"

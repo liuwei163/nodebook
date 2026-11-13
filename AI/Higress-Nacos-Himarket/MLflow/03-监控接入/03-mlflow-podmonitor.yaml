@@ -1,0 +1,31 @@
+# =============================================================================
+# MLflow exporter PodMonitor（兜底方案：注解抓取未生效时用）
+#
+# 背景：本集群 Prometheus CR（kube-system/cmss-kcs-prometheus）实测
+#   podMonitorSelector: {} + podMonitorNamespaceSelector: {}
+# 按 Prometheus Operator 语义，空选择器 = 全量选择，
+# 本文件 apply 后【无需改 Prometheus CR】即可被自动抓取。
+#
+# 使用时机：部署 exporter 后 2 分钟，Targets 里搜不到 mlflow → apply 本文件
+# 前置检查：kubectl api-resources | grep -i podmonitor   （确认 CRD 存在）
+# 验证：Prometheus UI → Status → Targets 搜 mlflow，或
+#   curl -s localhost:9090/api/v1/targets | grep -o '"job":"[^"]*"' | sort -u
+#
+# 注意：exporter 容器端口名必须是 metrics（01-部署与模型登记/01-mlflow.yaml 里已如此定义）
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: mlflow-exporter
+  namespace: ml-platform
+spec:
+  namespaceSelector:
+    matchNames:
+      - ml-platform
+  selector:
+    matchLabels:
+      app: mlflow
+  podMetricsEndpoints:
+    - port: metrics          # 对应 01-部署与模型登记/01-mlflow.yaml 中 exporter 容器的端口名
+      path: /metrics
+      interval: 30s          # 与 Prometheus 全局 scrapeInterval 对齐

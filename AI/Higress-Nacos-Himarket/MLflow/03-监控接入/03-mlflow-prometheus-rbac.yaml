@@ -1,0 +1,47 @@
+# =============================================================================
+# Prometheus 读 ml-platform 的 RBAC 授权（PodMonitor pool 存在但 0 target 时用）
+#
+# 背景（2026-11-09）：PodMonitor 已被 Operator 编进配置（Targets 页出现
+# podMonitor/ml-platform/mlflow-exporter/0 pool），但 pool 内无 target ——
+# 高度怀疑 Prometheus 的 SA（kube-system/cmss-kcs-prometheus）只有
+# kube-system 的读权限，list 不了 ml-platform 的 Pod。
+#
+# 验证（先跑这个，yes 则不需要本文件）：
+#   kubectl auth can-i list pods -n ml-platform \
+#     --as=system:serviceaccount:kube-system:cmss-kcs-prometheus
+#
+# 本文件方案：在 ml-platform 里建 Role + RoleBinding（纯新增资源，
+# 不改平台已有的 ClusterRole/ClusterRoleBinding，无被回滚风险）
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus-mlflow-reader
+  namespace: ml-platform
+rules:
+  # PodMonitor 发现需要：list/watch pods
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # ServiceMonitor 发现需要：services / endpoints / endpointslices（一并给全，
+  # 以后若改走 ServiceMonitor 也免得再授权）
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus-mlflow-reader
+  namespace: ml-platform
+subjects:
+  - kind: ServiceAccount
+    name: cmss-kcs-prometheus
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: prometheus-mlflow-reader
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,52 @@
+# =============================================================================
+# MLflow exporter ServiceMonitor（Plan B：PodMonitor 也不可用时才用）
+#
+# 背景（2026-11-06 实测）：本集群 Prometheus（kube-system/cmss-kcs-prometheus）
+# 的 Targets 页全部 scrape pool 均为 serviceMonitor/ 前缀 —— 该栈只认
+# ServiceMonitor 式抓取，无 Pod 注解抓取。首选方案是 PodMonitor
+# （03-监控接入/03-mlflow-podmonitor.yaml）；仅当 PodMonitor CRD 不存在或
+# Operator 不认它时，才降级用本文件。
+#
+# 本文件做两件事：
+#   1) 重申 Service mlflow：补 metadata.labels（ServiceMonitor 靠 Service 的
+#      标签做选择）+ 新增 metrics 9110 端口（幂等 apply，对现有服务无损）
+#   2) 建 ServiceMonitor 抓该 Service 的 metrics 端口
+#
+# 验证：Prometheus Targets 页应出现 podMonitor/... 或 serviceMonitor/ml-platform/
+#       mlflow-exporter/0 (1/1 up)，或查 targets API 搜 mlflow
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: ml-platform
+  labels:                    # ServiceMonitor 的 selector 匹配的是 Service 的标签
+    app: mlflow
+spec:
+  type: ClusterIP
+  selector:
+    app: mlflow
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+    - name: metrics          # 新增：导出器指标端口，经 selector 解析到 Pod 的 9110
+      port: 9110
+      targetPort: metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mlflow-exporter
+  namespace: ml-platform
+spec:
+  namespaceSelector:
+    matchNames:
+      - ml-platform
+  selector:
+    matchLabels:
+      app: mlflow
+  endpoints:
+    - port: metrics          # 对应上面 Service 里的端口名
+      path: /metrics
+      interval: 30s

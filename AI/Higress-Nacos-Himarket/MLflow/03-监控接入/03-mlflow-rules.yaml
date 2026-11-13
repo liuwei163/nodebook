@@ -1,0 +1,69 @@
+# =============================================================================
+# MLflow 告警规则（PrometheusRule，apply 即生效——本集群 ruleSelector 为空=全量加载）
+#
+# 部署：kubectl apply -f 03-监控接入/03-mlflow-rules.yaml
+# 验证：Prometheus UI → Alerts 页应列出 6 条，状态 inactive 为正常（未触发）
+# 说明：label 仅作归类用；run 计数指标在删除 run 时可能短暂回落，
+#       increase() 出现负值属已知特性，告警表达式不受影响
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: mlflow-rules
+  namespace: ml-platform
+  labels:
+    app: mlflow
+spec:
+  groups:
+    - name: mlflow
+      rules:
+        # ---- 错误信号 ----
+        - alert: MlflowServerDown
+          expr: mlflow_up == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "MLflow 服务不可达（/health 失败持续 2 分钟）"
+            description: "先看 Pod：kubectl -n ml-platform get pods -l app=mlflow；处置按运维手册第 8 节 SOP"
+        - alert: MlflowMetricsMissing
+          expr: absent(mlflow_up)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "MLflow exporter 指标消失（Pod 挂了或抓取断链）"
+            description: "Targets 页搜 mlflow 确认 scrape pool 状态；排查决策树见监控手册 3.1.2"
+        # ---- 饱和度信号 ----
+        - alert: MlflowDiskHigh
+          expr: mlflow_disk_used_ratio > 0.85
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "NFS 共享盘水位超 85%（注意口径是整块共享盘，不只 MLflow）"
+            description: "先 du 定位大文件，处置看运维手册第 5 节"
+        - alert: MlflowDiskCritical
+          expr: mlflow_disk_used_ratio > 0.90
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "NFS 共享盘水位超 90%，写满将导致 MLflow 全部不可写"
+        # ---- 延迟信号 ----
+        - alert: MlflowProbeSlow
+          expr: mlflow_health_probe_duration_seconds > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "MLflow /health 探活延迟超 1 秒（性能劣化前兆）"
+            description: "常见原因：NFS 抖动、sqlite 写锁竞争、宿主机负载高"
+        # ---- 业务事件 ----
+        - alert: MlflowTrainingFailed
+          expr: 'increase(mlflow_runs_by_status{status="FAILED"}[1h]) > 0'
+          labels:
+            severity: info
+          annotations:
+            summary: "最近 1 小时有训练 run 失败（业务事件，按需关注）"
+            description: "用 MLflow UI 查失败 run 的报错；删除 run 可能造成计数短暂回落，忽略负值"

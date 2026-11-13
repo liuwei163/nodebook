@@ -1,0 +1,75 @@
+# =============================================================================
+# MLflow 元数据自动备份 CronJob（每天凌晨执行，保留 30 天）
+#
+# 应用:  kubectl apply -f 02-运维与备份/02-mlflow-backup-cronjob.yaml
+# 查看:  kubectl -n ml-platform get cronjob,jobs -l app=mlflow-backup
+# 手动触发一次: kubectl -n ml-platform create job --from=cronjob/mlflow-backup mlflow-backup-manual
+# 查看备份结果: kubectl -n ml-platform logs job/mlflow-backup-manual
+#
+# 说明:
+#   - 用的是集群里已有的 mlflow:v2.17.2 镜像（内有 python + sqlite3 模块），零新增物料
+#   - 挂同一个 PVC: 只"读" /data/mlflow.db（backup API 支持并发读，安全），
+#     只"写" /data/backup/，不碰服务端单写者原则
+#   - schedule 默认按 controller-manager 时区；若 apiserver 报 timeZone 不支持，删掉该行
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mlflow-backup
+  namespace: ml-platform
+  labels:
+    app: mlflow-backup
+spec:
+  schedule: "30 1 * * *"          # 若集群按 UTC 调度，此为北京时间 09:30，可自行调整
+  timeZone: "Asia/Shanghai"       # K8s >=1.27 支持；报错则删除本行并把 schedule 改成 UTC 时间
+  concurrencyPolicy: Forbid       # 上一次没跑完不允许叠加
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: mlflow-backup
+        spec:
+          restartPolicy: OnFailure
+          imagePullSecrets:
+            - name: harbor-secret
+          containers:
+            - name: backup
+              image: harbor.ai.cnpc/ai-platform-poc/mlflow:v2.17.2
+              imagePullPolicy: IfNotPresent
+              command: ["python3", "-c"]
+              args:
+                - |
+                  import sqlite3, datetime, os, glob, time
+                  os.makedirs('/data/backup', exist_ok=True)
+                  stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+                  src = sqlite3.connect('/data/mlflow.db')
+                  dst = sqlite3.connect('/data/backup/mlflow-%s.db' % stamp)
+                  src.backup(dst)
+                  dst.close(); src.close()
+                  print('backup-ok:', stamp)
+                  chk = sqlite3.connect('/data/backup/mlflow-%s.db' % stamp)
+                  print('integrity_check:', chk.execute('PRAGMA integrity_check').fetchone()[0])
+                  chk.close()
+                  now = time.time()
+                  for f in glob.glob('/data/backup/mlflow-*.db'):
+                      if os.path.getmtime(f) < now - 30 * 86400:
+                          os.remove(f)
+                          print('removed-old:', f)
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: 256Mi
+                limits:
+                  cpu: "500m"
+                  memory: 512Mi
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: mlflow-data

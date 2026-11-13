@@ -1,0 +1,126 @@
+# pd-22-32B-n1-tp8.yaml
+# 方案三：共置单实例 TP=8（8 卡全给一个实例，不再拆 prefill/decode）
+# 由 方案二 dk32-pd.yaml 改造：合并两个 role、TP 4→8、删掉 KV 传输配置
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: deepseek-r1-distill-qwen-32b
+  namespace: kthena-system
+spec:
+  rolloutStrategy:
+    type: RoleRollingUpdate
+  schedulerName: volcano
+  replicas: 1
+  recoveryPolicy: RoleRecreate
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      # ==================== 唯一角色（TP=8，既做 prefill 也做 decode）====================
+      - name: server
+        replicas: 1
+        maxUnavailable: 1
+        entryTemplate:
+          spec:
+            nodeSelector:
+              kubernetes.io/hostname: kcs-aip-yanfa-shengchanyu-s-qzxs8
+            tolerations:
+              - key: node-unschedulable
+                operator: Equal
+                value: "true"
+                effect: NoSchedule
+              - key: volcano.sh/dedicated
+                operator: Equal
+                value: only-npu
+                effect: NoSchedule
+            imagePullSecrets:
+              - name: harbor-secret
+            containers:
+              - name: vllm
+                image: harbor.ai.cnpc/repo/ascend/vllm-ascend:v0.22.1rc1
+                ports:
+                  - containerPort: 8000
+                env:
+                  - name: ASCEND_TASK_QUEUE_ENABLE
+                    value: "1"
+                  - name: ASCEND_HCCN_CONFIG_PATH
+                    value: "/etc/hccn.conf"
+                  - name: ASCEND_CONNECT_TIMEOUT
+                    value: "30000"
+                  - name: ASCEND_AUTO_CONNECT
+                    value: "true"
+                  - name: ASCEND_USE_SHORT_CONNECTION
+                    value: "true"
+                  - name: ASCEND_SLOG_PRINT_TO_STDOUT
+                    value: "0"
+                  - name: LD_LIBRARY_PATH
+                    value: "/usr/local/lib:/usr/local/Ascend/nnal/atb/9.0.0/atb/cxx_abi_1/lib:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/cann-9.0.0/aarch64-linux/lib64:$LD_LIBRARY_PATH"
+                  - name: HF_HUB_OFFLINE
+                    value: "1"
+                  - name: HCCL_IF_IP
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: status.podIP
+                  - name: GLOO_SOCKET_IFNAME
+                    value: eth0
+                  - name: TP_SOCKET_IFNAME
+                    value: eth0
+                  - name: HCCL_SOCKET_IFNAME
+                    value: eth0
+                  - name: VLLM_LOGGING_LEVEL
+                    value: INFO
+                  - name: AscendRealDevices
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.annotations['huawei.com/AscendReal']
+                command: ["/bin/bash", "-c"]
+                args:
+                  - "source /usr/local/Ascend/ascend-toolkit/set_env.sh && python3 -m vllm.entrypoints.openai.api_server --host 0.0.0.0 --port 8000 --model /models/DeepSeek-R1-Distill-Qwen-32B --served-model-name DeepSeek-R1-Distill-Qwen-32B --tensor-parallel-size 8 --gpu-memory-utilization 0.92 --max-model-len 8192 --max-num-batched-tokens 16384 --no-enable-log-requests --disable-log-stats --trust-remote-code"
+                imagePullPolicy: IfNotPresent
+                resources:
+                  limits:
+                    cpu: "64"
+                    memory: 512Gi
+                    huawei.com/Ascend910: 8
+                  requests:
+                    cpu: "64"
+                    memory: 512Gi
+                    huawei.com/Ascend910: 8
+                readinessProbe:
+                  initialDelaySeconds: 180
+                  periodSeconds: 5
+                  failureThreshold: 8
+                  httpGet:
+                    path: /health
+                    port: 8000
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+                    readOnly: true
+                  - name: hccn-config
+                    mountPath: /etc/hccn.conf
+                    readOnly: true
+                  - name: shared-memory-volume
+                    mountPath: /dev/shm
+                  - name: ascend-driver
+                    mountPath: /usr/local/Ascend/driver
+                    readOnly: true
+            volumes:
+              - name: models
+                hostPath:
+                  path: /mnt/nfs-temp/models/
+                  type: DirectoryOrCreate
+              - name: hccn-config
+                hostPath:
+                  path: /etc/hccn.conf
+                  type: FileOrCreate
+              - name: shared-memory-volume
+                emptyDir:
+                  medium: Memory
+              - name: ascend-driver
+                hostPath:
+                  path: /usr/local/Ascend/driver
+                  type: Directory
+        workerReplicas: 0
+        workerTemplate:
+          spec:
+            containers: []
