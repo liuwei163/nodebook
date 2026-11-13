@@ -1,0 +1,38 @@
+# Nacos 控制台对外暴露（经 Higress 网关 + 现有 CLB）
+#
+# 前置：
+#   1. higress-gateway 已通过 CLB 暴露（本项目为 <MODEL_GW_IP>:30080）
+#   2. 集群已存在 ingressClass: himarket
+#
+# 应用：
+#   kubectl apply -f 22-nacos-ingress.yaml
+#
+# 访问：
+#   客户端 hosts 增加：<MODEL_GW_IP>  nacos.example.internal
+#   浏览器打开：http://nacos.example.internal:30080
+#
+# 安全提示：
+#   - Nacos 里存放全部配置（可能含数据库密码、密钥），暴露前务必确认密码强度
+#   - 只暴露 8080（控制台/API），切勿把 8848 / 9848 暴露出去
+#     8848 是客户端接口，暴露等于允许外部直接改配置、注册服务
+#   - 如只需要运维访问，建议改用 port-forward，不要长期开放本路由
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nacos-console
+  namespace: himarket
+spec:
+  ingressClassName: himarket
+  rules:
+    - host: nacos.example.internal
+      http:
+        paths:
+          # 控制台可能是根路径或 /nacos，两个都转发，避免 404
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nacos
+                port:
+                  number: 8080

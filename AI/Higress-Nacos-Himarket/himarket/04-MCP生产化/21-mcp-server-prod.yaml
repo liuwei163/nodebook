@@ -1,0 +1,399 @@
+# ---------------------------------------------------------------------------
+# MCP Server 生产化部署清单
+#
+# 与 PoC 版（21-mini-mcp.yaml）的九个差别，每一条都对应一个真实故障场景：
+#
+#   1. 自建镜像        取代 kubeflow/python:3.7 + ConfigMap，制品可复现、可扫描、可回滚
+#   2. 非 root + 只读根 被攻破后无法落地文件、无法提权
+#   3. 三类探针         startup 防误杀、readiness 摘流量、liveness 做 MCP 协议级检测
+#   4. 双副本 + 反亲和  单节点故障不影响可用性
+#   5. PDB             节点维护/升级时不会同时驱逐两个副本
+#   6. HPA             流量突增能扩容（MCP 是 IO 密集，CPU 只是兜底指标）
+#   7. NetworkPolicy   只允许网关和 himarket-server 访问，其余全拒
+#   8. 注册器 sidecar   Nacos 注册随 Pod 生命周期自动增删，不留幽灵实例
+#   9. preStop 宽限     摘流量和进程退出之间留出窗口，避免在途请求被切断
+#
+# 应用（从工作区根目录执行；ServiceAccount / Service / Deployment 都在本清单内）：
+#   kubectl -n himarket create configmap nacos-register-script \
+#     --from-file=11-nacos-register.sh=04-MCP生产化/11-nacos-register.sh
+#   kubectl -n himarket create secret generic nacos-mcp-auth \
+#     --from-literal=username='nacos' --from-literal=password='你的密码'
+#   kubectl -n himarket apply -f 04-MCP生产化/21-mcp-server-prod.yaml
+# ---------------------------------------------------------------------------
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp-server
+  namespace: himarket
+  labels:
+    app.kubernetes.io/name: mini-mcp
+    app.kubernetes.io/part-of: ai-platform
+# 不需要任何 RBAC 权限：MCP 不用访问 k8s API。
+# 显式建 SA 而不复用 default，是为了能在审计日志里区分「谁在调 k8s API」。
+automountServiceAccountToken: false
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mini-mcp
+  namespace: himarket
+  labels:
+    app: mini-mcp
+spec:
+  type: ClusterIP
+  # 生产不建议 NodePort：nodePort 一旦占用就会成为「隐性公共入口」，
+  # 绕过网关的鉴权和限流。对外暴露统一走 Ingress/Gateway。
+  selector:
+    app: mini-mcp
+  ports:
+    - name: http
+      port: 8765
+      targetPort: http
+      protocol: TCP
+  # 会话保持：MCP 的 SSE 传输是有状态的，同一客户端的后续 POST 必须回到同一 Pod。
+  # Streamable HTTP 无状态，不需要；但如果同时暴露 /sse，就必须开。
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mini-mcp
+  namespace: himarket
+  labels:
+    app: mini-mcp
+    app.kubernetes.io/version: "1.2.0"
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0        # 滚动更新期间不允许少副本
+  selector:
+    matchLabels:
+      app: mini-mcp
+  template:
+    metadata:
+      labels:
+        app: mini-mcp
+        app.kubernetes.io/version: "1.2.0"
+      annotations:
+        # 让 Prometheus 通过 ServiceMonitor 抓这个 Pod 的 /metrics（若已接入指标）
+        prometheus.io/scrape: "false"
+        prometheus.io/port: "8765"
+    spec:
+      serviceAccountName: mcp-server
+      automountServiceAccountToken: false
+
+      # ---- 调度约束：两个副本必须落在不同节点 ----------------------------
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway   # 单节点环境降级为「尽量分散」而不是 Pending
+          labelSelector:
+            matchLabels:
+              app: mini-mcp
+
+      # 镜像拉取凭据：从 himarket-server 抄过来，避免各写各的
+      # imagePullSecrets:
+      #   - name: harbor-secret
+
+      # ---- 优雅退出窗口 -------------------------------------------------
+      # 顺序很重要：先收到 SIGTERM，同时 k8s 把它从 Endpoints 移除。
+      # 网关感知到 Endpoints 变化有延迟（Nacos 心跳 5s + 网关缓存），
+      # 所以 preStop 先睡 8s，让流量真正流走，再让进程退出。
+      terminationGracePeriodSeconds: 30
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        # =================================================================
+        # 主容器：MCP 服务
+        # =================================================================
+        - name: mcp-server
+          image: harbor.example.internal/ai-platform/mini-mcp:1.2.0   # ← 替换成你的 Harbor 路径
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8765
+              protocol: TCP
+
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: MCP_PORT
+              value: "8765"
+
+          # ---- 资源：requests 决定调度和 QoS，limits 决定爆炸半径 --------
+          # MCP 是 IO 密集型（等后端响应），CPU 需求小、内存平稳。
+          # 给太大会浪费，给太小会在日志/JSON 序列化抖动时被 OOMKill。
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+
+          # ---- 三类探针，职责完全不同，不能互相替代 ----------------------
+          # startup：给慢启动兜底。失败前 readiness/liveness 都不生效，
+          #          避免「还在初始化就被 liveness 杀掉」的循环重启。
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            failureThreshold: 30        # 最多容忍 60s 启动
+
+          # readiness：决定是否进 Endpoints（网关是否把流量导进来）。
+          # 失败只是摘流量，不重启。本地健康检查失败时注册器也会主动摘除。
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2         # 连续 2 次失败（10s）就摘流量
+            successThreshold: 1
+
+          # liveness：决定是否重启容器。
+          # 关键点：不用 httpGet /healthz，而是真发一次 tools/list。
+          # 原因：HTTP 服务器活着不等于 MCP 协议层正常——线程池卡死、
+          # JSON-RPC 分发异常时，/healthz 照样返回 200，但这种 Pod 必须重启。
+          livenessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - |
+                  import json, urllib.request
+                  req = urllib.request.Request(
+                      'http://127.0.0.1:8765/mcp',
+                      data=json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/list"}).encode(),
+                      headers={'Content-Type':'application/json'})
+                  r = json.load(urllib.request.urlopen(req, timeout=3))
+                  assert r['result']['tools'], 'no tools'
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3         # 连续 3 次（约 60s）才重启，避免抖动
+
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 8"]
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp          # 只读根文件系统下，Python 临时文件需要可写目录
+
+        # =================================================================
+        # Sidecar：Nacos 注册器
+        # =================================================================
+        # 独立容器的三个好处：
+        #   1. 主容器崩溃重启时，注册器不受影响，不需要重新注册
+        #   2. 注册逻辑可以用自己需要的工具（curl），不污染业务镜像
+        #   3. 注册器挂了只影响服务发现，不会带走 MCP 本体
+        - name: nacos-registrar
+          # 需要 curl + sh，用 alpine 系的小镜像；离线环境替换成 Harbor 内的等价镜像
+          image: curlimages/curl:8.7.1
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "/scripts/11-nacos-register.sh"]
+
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP          # 注册 Pod IP 而不是 ClusterIP：
+                                                   # 网关直连 Pod，少一层 DNAT，熔断和负载均衡才准
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NACOS_ADDR
+              value: "nacos.himarket.svc.cluster.local:8848"
+            - name: NACOS_NAMESPACE
+              value: "ai-mcp"                      # 必须与 McpBridge 的 nacosNamespaceId 一致
+            - name: NACOS_GROUP
+              value: "MCP_PROD"
+            - name: MCP_SERVICE_NAME
+              value: "mini-mcp"
+            - name: MCP_PORT
+              value: "8765"
+            - name: NACOS_EPHEMERAL
+              value: "true"                        # 临时实例：心跳停 15s 后自动摘除
+            - name: NACOS_USER
+              valueFrom:
+                secretKeyRef:
+                  name: nacos-mcp-auth
+                  key: username
+                  optional: true
+            - name: NACOS_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: nacos-mcp-auth
+                  key: password
+                  optional: true
+
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: registrar-script
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: registrar-script
+          configMap:
+            name: nacos-register-script
+            defaultMode: 0555
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mini-mcp
+  namespace: himarket
+spec:
+  minAvailable: 1        # 节点排水/集群升级时至少留 1 个可用
+  selector:
+    matchLabels:
+      app: mini-mcp
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mini-mcp
+  namespace: himarket
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mini-mcp
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    # 注意这里只用了 CPU，是个妥协：
+    # MCP 的主要开销是「等后端响应」，CPU 占用低但并发可能已经很高。
+    # 真正的生产指标应该是「在途请求数」或「P95 延迟」，
+    # 需要 MCP Server 暴露自定义指标 + Prometheus Adapter。见手册「可观测性」一章。
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300    # 缩容等 5 分钟，避免流量抖动导致反复伸缩
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mini-mcp
+  namespace: himarket
+spec:
+  podSelector:
+    matchLabels:
+      app: mini-mcp
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # ---- 入站：只放行两个来源 ---------------------------------------------
+  ingress:
+    # 1. higress 网关（经 Nacos 发现后转发过来）
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: himarket
+          podSelector:
+            matchLabels:
+              app: higress-gateway
+      ports:
+        - protocol: TCP
+          port: 8765
+
+    # 2. himarket-server 自身（HiChat 直连 MCP 时走这条，不经网关）
+    - from:
+        - podSelector:
+            matchLabels:
+              app: himarket-server
+      ports:
+        - protocol: TCP
+          port: 8765
+
+  # ---- 出站：默认拒绝，按需放开 -----------------------------------------
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # Nacos（注册器需要）
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: himarket
+          podSelector:
+            matchLabels:
+              app: nacos
+      ports:
+        - protocol: TCP
+          port: 8848
+        - protocol: TCP
+          port: 9848        # Nacos 2.x+ 的 gRPC 端口
+
+    # 业务后端：等 mini-mcp 真的去调 CMDB/工单/监控时，在这里逐条放开。
+    # 这是「最小权限」的具体落地——不是一次配全，而是用一次加一条。
+    # - to:
+    #     - namespaceSelector:
+    #         matchLabels:
+    #           kubernetes.io/metadata.name: ops
+    #   ports:
+    #     - protocol: TCP
+    #       port: 8080
