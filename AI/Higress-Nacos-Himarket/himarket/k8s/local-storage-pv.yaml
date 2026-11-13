@@ -1,0 +1,77 @@
+# 静态 PV：适配 KCS 上唯一可用的 StorageClass
+#
+# 背景：集群里只有
+#   NAME            PROVISIONER                    RECLAIMPOLICY  VOLUMEBINDINGMODE      AGE
+#   local-storage   kubernetes.io/no-provisioner   Delete         WaitForFirstConsumer   100d
+#
+# no-provisioner 意味着**不会动态创建 PV**。HiMarket chart 会为 mysql 和 sandbox
+# 各申请一个 50Gi 的 PVC，没有 PV 可绑，PVC 会一直 Pending，mysql 起不来，
+# install.sh 在 300s 超时后整体回滚（--atomic）。
+#
+# 所以部署前必须先手工建这两个 PV。
+#
+# 使用前请把 NODE_NAME 换成你要用的 worker 节点：
+#   kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o name
+#
+# 说明：
+# - 用 hostPath + DirectoryOrCreate，kubelet 会自动创建目录，**不需要 SSH 到 worker**
+# - local 类型要求目录预先存在，托管集群拿不到节点 shell，所以选 hostPath
+# - reclaimPolicy 设 Retain，避免误删 PVC 时把数据一起清掉
+# - nodeAffinity 把 PV 钉在某个节点，调度器会自动把 pod 调度过去（无需再写 nodeSelector）
+# - 单节点本地盘的代价：节点故障时 mysql 不可用，研发/PoC 可接受；生产请改用云盘 CSI
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: himarket-mysql-pv
+  labels:
+    app: himarket
+    pv-for: mysql
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  hostPath:
+    path: /data/himarket/mysql
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - <HIMARKET_NODE_WORKER1>
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: himarket-sandbox-pv
+  labels:
+    app: himarket
+    pv-for: sandbox
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  hostPath:
+    path: /data/himarket/sandbox
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - <HIMARKET_NODE_WORKER1>

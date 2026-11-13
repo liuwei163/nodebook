@@ -1,0 +1,172 @@
+# =============================================================================
+# Qwen3-32B · 裸 Deployment（不经过 Kthena / ModelServing）
+#
+# 用途：仅在 ModelServing 起不来、需要隔离"是不是 Kthena 的问题"时使用。
+#       正常运行请用 qwen3-32b-modelserving.yaml。
+#
+# 与 ModelServing 版本的关系：
+#   - 容器内跑的都是同一个 vllm.entrypoints.openai.api_server
+#   - 镜像、环境变量、挂载、vLLM 参数完全一致
+#   - 差别只在没有 volcano 调度、没有角色管理、没有 PD 分离能力
+#
+# 用法：kubectl apply -f vllm-qwen3-32b-deploy.yaml
+# 删除：kubectl delete -f vllm-qwen3-32b-deploy.yaml
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen3-32b
+  namespace: kthena-system          # 与 ModelServing 同命名空间，便于对比；也可改 himarket
+  labels:
+    app: vllm-qwen3-32b
+spec:
+  replicas: 1
+  # Recreate：8 卡独占，滚动更新会因卡不够而卡住，必须先把旧 Pod 干掉
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-qwen3-32b
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen3-32b
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: <MODEL_CLUSTER_NODE>
+      tolerations:
+        - key: node-unschedulable
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+        - key: volcano.sh/dedicated
+          operator: Equal
+          value: only-npu
+          effect: NoSchedule
+      imagePullSecrets:
+        - name: harbor-secret
+
+      containers:
+        - name: vllm
+          image: harbor.example.internal/repo/ascend/vllm-ascend:v0.22.1rc1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ASCEND_TASK_QUEUE_ENABLE
+              value: "1"
+            - name: ASCEND_HCCN_CONFIG_PATH
+              value: "/etc/hccn.conf"
+            - name: ASCEND_CONNECT_TIMEOUT
+              value: "30000"
+            - name: ASCEND_AUTO_CONNECT
+              value: "true"
+            - name: ASCEND_USE_SHORT_CONNECTION
+              value: "true"
+            - name: ASCEND_SLOG_PRINT_TO_STDOUT
+              value: "0"
+            - name: LD_LIBRARY_PATH
+              value: "/usr/local/lib:/usr/local/Ascend/nnal/atb/9.0.0/atb/cxx_abi_1/lib:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/cann-9.0.0/aarch64-linux/lib64:$LD_LIBRARY_PATH"
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: HCCL_IF_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            - name: TP_SOCKET_IFNAME
+              value: eth0
+            - name: HCCL_SOCKET_IFNAME
+              value: eth0
+            - name: VLLM_LOGGING_LEVEL
+              value: INFO
+            - name: AscendRealDevices
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['huawei.com/AscendReal']
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - >-
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh &&
+              python3 -m vllm.entrypoints.openai.api_server
+              --host 0.0.0.0
+              --port 8000
+              --model /models/Qwen3-32B
+              --served-model-name qwen3-32b
+              --tensor-parallel-size 8
+              --gpu-memory-utilization 0.92
+              --max-model-len 32768
+              --max-num-batched-tokens 16384
+              --no-enable-log-requests
+              --disable-log-stats
+              --trust-remote-code
+              --enable-auto-tool-choice
+              --tool-call-parser hermes
+              --reasoning-parser qwen3
+
+          resources:
+            limits:
+              cpu: "64"
+              memory: 512Gi
+              huawei.com/Ascend910: 8
+            requests:
+              cpu: "64"
+              memory: 512Gi
+              huawei.com/Ascend910: 8
+
+          readinessProbe:
+            initialDelaySeconds: 300
+            periodSeconds: 10
+            failureThreshold: 30
+            httpGet:
+              path: /health
+              port: 8000
+
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: hccn-config
+              mountPath: /etc/hccn.conf
+              readOnly: true
+            - name: shared-memory-volume
+              mountPath: /dev/shm
+            - name: ascend-driver
+              mountPath: /usr/local/Ascend/driver
+              readOnly: true
+
+      volumes:
+        - name: models
+          hostPath:
+            path: /mnt/nfs-temp/models/
+            type: DirectoryOrCreate
+        - name: hccn-config
+          hostPath:
+            path: /etc/hccn.conf
+            type: FileOrCreate
+        - name: shared-memory-volume
+          emptyDir:
+            medium: Memory
+        - name: ascend-driver
+          hostPath:
+            path: /usr/local/Ascend/driver
+            type: Directory
+
+---
+# Service：给一个稳定域名，后续 HiMarket 建 AI 路由时可直接填
+#   vllm-qwen3-32b.kthena-system.svc.cluster.local:8000
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen3-32b
+  namespace: kthena-system
+spec:
+  selector:
+    app: vllm-qwen3-32b
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

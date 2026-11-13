@@ -1,0 +1,309 @@
+# HiMarket Kubernetes 集群部署手册
+
+> 项目：https://github.com/higress-group/himarket
+> 官方文档：https://higress.io/docs/himarket/himarket-deployment
+> 适用：自建 K8s / 云上 ACK、EKS 等；运维视角，含自查项与踩坑清单。
+>
+> **离线环境（Harbor + 自有 LB）不要照这份做**，看 [HiMarket-离线部署手册-可复现版.md](./HiMarket-离线部署手册-可复现版.md)。
+> 本文按「能访问公网 registry」写，价值在于讲清 install.sh 的内部机制、三套版本号、以及标准的 Helm 部署路径；
+> 本项目实际生产环境完全离线，那套流程在可复现版里，且与本文有 4 处结论不同（见下表）。
+
+| 本文的说法 | 离线环境的实际情况 | 出处 |
+|---|---|---|
+| 改 `~/himarket-install.env` 里的 `HIMARKET_HUB` / `HIMARKET_IMAGE_TAG` | **不生效**，`load_config` 会 `unset` 这些变量 | 可复现版 坑-15 |
+| 改 `values.yaml` 调镜像前缀 | 也不生效，`--set` 优先级高于 values | 同上 |
+| 只跑 `./install.sh` 就够 | 必须改 `install.sh` 的默认值 + 注释掉 `helm repo` 两行 | 可复现版 4.2 / 4.3 |
+| Service 用 LoadBalancer 直接拿 IP | 共享 CLB 端口被占，Service 长期 `<pending>`，业务靠 VIP 直连 | 可复现版 6.2 |
+
+---
+
+## 0. 部署形态说明
+
+官方提供两条路径，**集群部署只走 Helm**：
+
+| 方式 | 目录 | 适用 |
+|---|---|---|
+| Docker Compose | `deploy/docker` | 单机、本地开发 |
+| Helm (K8s) | `deploy/helm` | 生产 / 集群 |
+
+`install.sh` 本质是：读取 `~/himarket-install.env` → 渲染 values → `helm upgrade --install` → 执行 `hooks/post_ready.d/` 里的初始化脚本（Nacos 账号、门户数据、AI 模型等）。
+
+部署完成后一个完整栈包含 **10 个工作负载**（命名空间不同：himarket 与 higress-system）：
+
+- HiMarket：`himarket-server`（Java 17 / Spring Boot）、`himarket-admin`（Nginx + SPA）、`himarket-frontend`（Nginx + SPA）、`sandbox-shared`（云 IDE）、`mysql`（MySQL 8）
+- Higress：`higress-controller`（Go）、`higress-gateway`（Envoy）、`higress-console`（Java）、`redis-stack-server`（Redis 7.4）
+- Nacos：`nacos`（3.2.1）
+
+> 更正：Nacos **没有独立数据库**，`install.sh` 会在 himarket 的 mysql 里建 `nacos` 库并通过 `--set database.host` 注入。官方文档里的 `nacos-mysql` 是 Docker Compose 布局，Helm 部署不会出现。
+
+命名空间默认 `himarket`（脚本自动创建），Higress 在 `higress-system`。
+
+
+---
+
+## 0.5 版本号与版本锁定（重要）
+
+HiMarket 有**三套版本号**，Helm 部署时要分清：
+
+| 层级 | 最新 | 前一版 | 说明 |
+|---|---|---|---|
+| Git tag / 应用版本 | **v0.8.2**（2026-10-19） | **v0.8.1**（2026-09-21） | 决定 chart 模板、install.sh、hook 脚本 |
+| 镜像 tag | `v0.8.2` 和 `0.8.2`（同时存在） | `v0.8.1` / `0.8.1` | 由 CI 用 `type=ref,event=tag` + `type=semver` 双打 |
+| Helm Chart `version` | `0.1.0` | `0.1.0` | **未随版本递增**，`appVersion` 还是模板残留的 `1.16.0`，无参考价值 |
+
+结论：**官方没有发布 Helm chart 仓库**，只能从 git 源码部署，所以"版本号"= git tag + 镜像 tag 两者必须一致。
+
+```bash
+git clone https://github.com/higress-group/himarket.git
+cd himarket
+git checkout v0.8.2          # 或 v0.8.1
+
+cd deploy/helm
+# 关键：env 里默认 HIMARKET_IMAGE_TAG=latest，不改就会"代码 v0.8.2 + 镜像 latest"
+vi ~/himarket-install.env
+#   HIMARKET_IMAGE_TAG=v0.8.2
+./install.sh -n              # 或交互式 ./install.sh
+```
+
+> 坑：values.yaml 里 `pullPolicy: Always`，只要 tag 是 `latest`，每次重启都可能拉到新镜像，版本会漂。生产必须写死版本号。
+> `HIMARKET_IMAGE_TAG` 只作用于 `himarket-server / admin / frontend / sandbox` 四个镜像；MySQL、Nacos、Higress、Redis 各自用 `NACOS_VERSION` 等独立配置项。
+
+**升级路径**：v0.8.1 → v0.8.2 官方说明 **无需数据库迁移**，直接改 tag 重跑 `./install.sh`。
+v0.7.x → v0.8.x 才有 Flyway 迁移（`V21`/`V22` 建 `chat_memory` 表、加 `chat.message_chunks` 列），且 `toolCalls` 字段被 `messageChunks` 取代。
+
+## 1. 前置检查（部署前必做）
+
+### 1.0 目标集群判定：移动云 KCS
+
+节点名形如 `kcs-<集群名>-m-xxxxx`（master）/ `kcs-<集群名>-s-xxxxx`（worker），版本 `v1.29.5-eki.4.1.0` → **移动云容器服务 KCS 托管集群**，containerd 运行时。
+
+| 检查项 | 结论 | 需要做的动作 |
+|---|---|---|
+| K8s 版本 | 1.29.5，满足 HiMarket / Higress（要求 ≥1.20） | 无需处理 |
+| 控制面 | 3 master 默认带 `NoSchedule` 污点 | **11 个 Pod 全落在 3 个 worker 上**，先确认 worker 规格 |
+| 存储 | KCS 走云硬盘 CSI，没有 `alicloud-disk-essd` | `kubectl get sc` 取名，填 `MYSQL_STORAGE_CLASS` / `SANDBOX_STORAGE_CLASS` |
+| 负载均衡 | 有 CCM，Service 能用 LoadBalancer，但会创建云负载均衡实例并占公网 IP / 计费 | 内网访问优先 NodePort 或 ClusterIP + port-forward |
+| CNI | calico（VXLAN/BGP）或自研 starway | NodePort 方案需实测通不通；starway 集群建议先用 port-forward 验证 |
+| 镜像 | 需出公网访问阿里云杭州 registry | 先在 worker 上 `crictl pull` 单个镜像验证 |
+
+KCS 上跑这 5 条，输出直接决定 env 里填什么：
+
+```bash
+# 1) 存储类清单（最关键，取 NAME 填进 env）
+kubectl get sc
+
+# 2) 3 个 worker 的可分配资源（决定 size 取 small/standard/large）
+kubectl get nodes -o custom-columns='NAME:.metadata.name,CPU:.status.allocatable.cpu,MEM:.status.allocatable.memory,DISK:.status.allocatable.ephemeral-storage'
+
+# 3) 确认 worker 没有被污染
+kubectl get nodes -o json | jq '.items[] | {name:.metadata.name, taints:.spec.taints}'
+
+# 4) 是否已有 IngressClass（避免和 Higress 的 himarket class 冲突）
+kubectl get ingressclass
+
+# 5) CNI 类型
+kubectl -n kube-system get ds | grep -Ei 'calico|starway|cilium'
+```
+
+判定口径：
+
+- worker 单节点 `MEM < 8Gi` → 把 `size` 调到 `small`，并考虑 `sandbox.enabled=false`（sandbox 单 Pod limits 就是 4C8G）
+- `kubectl get sc` 返回多个 → 选 SSD/高性能云盘那个，`local-path` 类本地盘不要给 mysql（RWO 绑节点）
+- 已有 nginx-ingress → 别动它，Higress 用独立 IngressClass
+
+
+### 1.1 工具链检查（执行部署的机器）
+
+```bash
+kubectl version --short
+helm version --short
+which curl jq python3 git
+```
+
+
+资源下限建议：**可用配额 ≥ 8C / 16G / 100G 磁盘**。
+`sandbox` 单 Pod limits 就是 `4C8G`，`mysql` 是 `2C2G`，`server` 按 `size: standard` 给 `2C4G`。
+
+---
+
+## 2. 部署（二选一）
+
+### 方式 A：交互式（推荐首次部署）
+
+```bash
+git clone https://github.com/higress-group/himarket.git
+cd himarket/deploy/helm
+
+./install.sh
+```
+
+脚本会逐项引导：镜像仓库、各类密码、后台/前台默认账号、AI 模型配置。
+所有输入自动落盘到 `~/himarket-install.env`，后续升级直接复用。
+
+### 方式 B：非交互式（CI/CD、批量交付）
+
+```bash
+cd himarket/deploy/helm
+cp .env.example ~/himarket-install.env
+
+# 按下面「必改项」编辑
+vi ~/himarket-install.env
+
+./install.sh -n
+```
+
+---
+
+## 3. 自建集群必改项
+
+`values.yaml` 默认值是按阿里云 ACK 写的，自建集群**至少改这 3 处**：
+
+| 配置项 | 默认值 | 自建集群怎么改 |
+|---|---|---|
+| `MYSQL_STORAGE_CLASS` | `alicloud-disk-essd` | 改成集群实际有的，如 `local-path` / `nfs-client` / `ceph-rbd` |
+| `SANDBOX_STORAGE_CLASS` | `alicloud-disk-essd` | 同上 |
+| 服务暴露类型 | `LoadBalancer` | 无 LB 时改 `NodePort`，或保留 ClusterIP 用 port-forward / 自建 Ingress |
+
+其他常用项：
+
+```bash
+NAMESPACE=himarket                 # 命名空间
+HIMARKET_HUB=<私有仓库地址>         # 默认 opensource-registry.cn-hangzhou.cr.aliyuncs.com/higress-group
+HIMARKET_IMAGE_TAG=latest
+MYSQL_STORAGE_SIZE=50Gi
+SANDBOX_STORAGE_SIZE=50Gi
+HIGRESS_INGRESS_CLASS=himarket     # Higress 自建 IngressClass，与集群已有 controller 注意并存
+SKIP_AI_MODEL_INIT=true            # 不想初始化时跳过
+```
+
+> 服务类型 `LoadBalancer` 在 values 里位于 `frontend.service.type` / `admin.service.type`，`server` 默认 `ClusterIP`。
+> `install.sh` 生成的 values 会覆盖到 chart，**不要在 install 之后手改 helm release**，重跑脚本会覆盖掉。
+> 想改服务类型又不想动脚本，可先 `helm template ./himarket -n himarket` 看渲染结果，再用 `--set frontend.service.type=NodePort` 自行安装。
+
+---
+
+## 4. 验证
+
+```bash
+# 安装过程
+tail -f ~/himarket-install.log
+
+# Pod 状态
+kubectl get pods -n himarket -w
+```
+
+期望全部 `Running`（`mysql`、`nacos` 为 StatefulSet，首次启动 1~3 分钟）：
+
+```
+himarket-admin-xxx          1/1 Running
+himarket-server-xxx         1/1 Running
+himarket-frontend-xxx       1/1 Running
+sandbox-shared-xxx          1/1 Running
+mysql-0                     1/1 Running
+higress-console-xxx         1/1 Running
+higress-controller-xxx      1/1 Running
+higress-gateway-xxx         1/1 Running
+redis-stack-server-xxx      1/1 Running
+nacos-0                     1/1 Running
+nacos-mysql-0               1/1 Running
+```
+
+---
+
+## 5. 访问入口
+
+```bash
+kubectl get svc -n himarket
+```
+
+- 云上有 LB：直接取 `himarket-admin`、`himarket-frontend` 的 `EXTERNAL-IP`
+- 自建集群没有 LB：`EXTERNAL-IP` 会一直 `<pending>`，改用
+
+```bash
+# 临时访问
+kubectl port-forward -n himarket svc/himarket-admin 5175:80
+kubectl port-forward -n himarket svc/himarket-frontend 5173:80
+
+# 长期访问：把 service 改 NodePort
+kubectl patch svc himarket-admin -n himarket -p '{"spec":{"type":"NodePort"}}'
+kubectl get svc himarket-admin -n himarket    # 取 3xxxx 端口，用 <节点IP>:<NodePort>
+```
+
+默认账号（密码在 `~/himarket-install.env` 里，脚本自动生成的随机值）：
+
+| 入口 | 用户名 | 密码变量 |
+|---|---|---|
+| 管理后台 | `admin`（`ADMIN_USERNAME`） | `ADMIN_PASSWORD` |
+| 开发者门户 | `user`（`FRONT_USERNAME`） | `FRONT_PASSWORD` |
+| Nacos | `nacos` | `NACOS_ADMIN_PASSWORD` |
+| Higress 控制台 | `admin`（`HIGRESS_USERNAME`） | `HIGRESS_PASSWORD` |
+
+> 密码忘了直接 `grep PASSWORD ~/himarket-install.env`。
+
+---
+
+## 6. 初始化失败怎么补
+
+`post_ready.d` 里的 hook 负责写 Nacos 账号、导入门户数据、初始化 AI 模型。挂掉不影响 Pod 运行，可单独重试：
+
+```bash
+cd himarket/deploy/helm
+
+./install.sh --init-data          # 只重跑全部 hook，不重新部署
+
+# 或跑单个
+cd hooks/post_ready.d && ls -1
+./10-init-nacos-admin.sh
+```
+
+---
+
+## 7. 升级 / 卸载
+
+```bash
+cd himarket/deploy/helm
+
+# 升级：直接重跑，脚本检测到已有部署会给升级选项，配置沿用 env
+./install.sh
+
+# 卸载（服务 + 数据 + 配置一起清）
+./install.sh --uninstall
+```
+
+---
+
+## 8. 踩坑清单
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| Pod `ImagePullBackOff` | 镜像在 `opensource-registry.cn-hangzhou.cr.aliyuncs.com`，内网/海外拉不动 | 配私有仓库并改 `HIMARKET_HUB`；或给节点配 registry mirror |
+| `mysql-0` / `sandbox` 一直 `Pending` | storageClass 不存在，或 `WaitForFirstConsumer` 下无可用节点 | 先 `kubectl get sc` 确认名称，改成实际存在的 |
+| `EXTERNAL-IP` 一直 `<pending>` | 集群无 LoadBalancer 实现 | 改 NodePort / port-forward / 自建 Ingress |
+| 安装脚本中途报错 | 多为 hook 阶段初始化失败 | `tail -200 ~/himarket-install.log`，再 `./install.sh --init-data` |
+| 端口 80/443 冲突 | 集群已有 nginx-ingress 占位 | Higress 走自己的 IngressClass `himarket`，检查 `kubectl get ingressclass` |
+| `mysql-0` 换节点后起不来 | RWO 卷绑定旧节点（本地盘） | 用支持跨节点的 CSI，或把 mysql 固定到同一节点 |
+| 升级后配置被还原 | 手改过 helm values，重跑脚本覆盖 | 只改 `~/himarket-install.env`，不直改 release |
+
+---
+
+## 9. 最小化执行清单
+
+```bash
+# 1. 检查
+kubectl get nodes && kubectl get sc && helm version --short
+
+# 2. 拉代码
+git clone https://github.com/higress-group/himarket.git && cd himarket/deploy/helm
+
+# 3. 部署（交互）
+./install.sh
+
+# 4. 盯状态
+kubectl get pods -n himarket -w
+
+# 5. 拿入口
+kubectl get svc -n himarket
+
+# 6. 登录
+#    管理后台 admin / $(grep '^ADMIN_PASSWORD' ~/himarket-install.env | cut -d= -f2)
+```

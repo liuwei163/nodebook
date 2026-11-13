@@ -1,0 +1,225 @@
+# ---------------------------------------------------------------------------
+# Higress 接入配置（生产版）
+#
+# 这份文件解决三件事：
+#   1. 让网关「看得见」ai-mcp 命名空间下的 MCP 服务（McpBridge registry）
+#   2. 把 MCP 暴露到独立域名，与业务网关流量隔离（虚拟服务由 McpBridge 自动生成）
+#   3. 在网关层加鉴权和限流，不依赖上游应用自己实现
+#
+# 先读这段，能省掉大半排错时间 —— Higress 暴露 MCP 的路径规则：
+#
+#   http://<mcpServerExportDomains>/<mcpServerBaseUrl>/<服务名>/<剩余路径>
+#        ↓ 转发时去掉 前两段，剩余路径原样透传
+#   http://<实例 IP:端口>/<剩余路径>
+#
+#   例：服务名 mini-mcp，服务实际监听 /mcp
+#     外部访问  http://mcp-prod.example.internal/mcp-servers/mini-mcp/mcp
+#     网关转发  http://10.233.x.x:8765/mcp
+#
+#   两个必踩的坑：
+#     · 少写 /mcp 后缀 → 网关转发到根路径 /，服务返回健康检查 JSON，MCP 握手失败
+#     · 服务名与 Nacos 里不一致（大小写、连字符） → 404 route not found
+#
+# 另一个关键选择：只暴露 Streamable HTTP，不暴露 /sse。
+#   SSE 的服务端会在握手时返回 `event: endpoint` + `data: /message?sessionId=...`，
+#   这个路径是服务自己生成的，不含网关前缀。经过路径重写后客户端会拼出
+#   http://mcp-prod.example.internal/message?... （丢了 /mcp-servers/mini-mcp），直接 404。
+#   要修就得在网关做响应体改写，成本高且脆弱。Streamable HTTP 是无状态 POST，
+#   没有这个问题。
+# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# 第一部分：McpBridge —— 注册中心订阅
+# ===========================================================================
+# ⚠️ 这个 CR 是「整体声明式」的：apply 会覆盖整个 spec.registries 数组。
+#    所以下面把现有的 4 条静态 registry 全部保留，只新增第 5 条。
+#    如果你是渐进式改（不想整体替换），用文末的 JSON patch 方式。
+apiVersion: networking.higress.io/v1
+kind: McpBridge
+metadata:
+  name: default
+  namespace: himarket
+spec:
+  proxies: []
+  registries:
+    # ---- 现有静态条目，原样保留 ----------------------------------------
+    - domain: <MODEL_GW_IP>:30081
+      name: DeepSeek-R1-Distill-Qwen-32B
+      port: 80
+      protocol: http
+      type: static
+
+    - domain: <CODING_PLAN_IP>:8082
+      name: coding-plan.example.internal
+      port: 80
+      protocol: http
+      proxyName: ""
+      type: static
+
+    - domain: <MODEL_GW_IP>:30081
+      name: qwen3-32b
+      port: 80
+      protocol: http
+      type: static
+
+    # ---- 原有 Nacos registry（public 命名空间，PoC/存量用）--------------
+    # 保留不动：demo-time-mcp 直连版和 test 都走这条，动了会影响已验证的链路
+    - allowMcpServers:
+        - native-demo-mcp
+        - openapi-demo-mcp
+      authSecretName: open-platform-higress-nacos
+      domain: nacos.himarket.svc.cluster.local
+      enableMCPServer: true
+      mcpServerBaseUrl: /mcp-servers/
+      mcpServerExportDomains:
+        - mcp.example.internal
+      nacosGroups:
+        - DEFAULT_GROUP
+        - mcp-endpoints
+      nacosNamespaceId: public
+      name: company-nacos
+      port: 8848
+      type: nacos3
+      vport:
+        default: 8080
+
+    # ---- 新增：生产 MCP 专用 registry（ai-mcp 命名空间）-----------------
+    #
+    # 为什么单独一条而不是改上面那条的 nacosNamespaceId：
+    #   那个字段是单值，改掉等于「只能看一个命名空间」。改了 public，
+    #   原来 public 下所有服务（test、DEFAULT_GROUP 里的东西）立刻看不见。
+    #   加一条新 registry 才能让两个命名空间并存 —— 这是 Nacos 多环境隔离在
+    #   Higress 侧的正确落地方式。
+    #
+    # 字段逐个说明（学习要点）：
+    #   name             registry 的名字，必须全局唯一，网关日志里靠它区分来源
+    #   type             nacos3（Nacos 2.x/3.x）| nacos2（1.x）| static | dns
+    #   domain:port      Nacos 的接入地址（集群内用 svc 全名）
+    #   nacosNamespaceId 命名空间 ID，填「命名空间 ID」不是「命名空间名称」
+    #   nacosGroups      要订阅的分组，数组；这里只订 MCP_PROD，避免把普通微服务拉进来
+    #   allowMcpServers  白名单：只有列在这里的服务才会被当作 MCP 暴露。
+    #                    这是安全边界——不在名单里的服务即使注册了也不会生成路由
+    #   enableMCPServer  总开关，false 时整条 registry 的 MCP 能力关闭
+    #   mcpServerBaseUrl 暴露路径前缀，必须以 / 开头和结尾
+    #   mcpServerExportDomains 允许的 Host 列表。请求 Host 不在这里面会被拒
+    #   authSecretName   访问 Nacos 的凭据（同名 Secret，在 himarket 命名空间）
+    #   vport            虚拟端口映射。nacos 注册的服务在网关侧监听 8080，
+    #                    用于多注册中心同名服务隔离；MCP 的 HTTP 暴露不走它
+    - allowMcpServers:
+        - mini-mcp
+      authSecretName: open-platform-higress-nacos
+      domain: nacos.himarket.svc.cluster.local
+      enableMCPServer: true
+      mcpServerBaseUrl: /mcp-servers/
+      mcpServerExportDomains:
+        - mcp-prod.example.internal          # 独立域名：与 mcp.example.internal 上跑的东西完全隔离
+      nacosGroups:
+        - MCP_PROD
+      nacosNamespaceId: ai-mcp
+      name: company-nacos-ai
+      port: 8848
+      type: nacos3
+      vport:
+        default: 8080
+
+# ===========================================================================
+# 第二部分：域名接入
+# ===========================================================================
+# McpBridge 只负责「生成路由」，不负责「让域名指过来」。
+# mcp-prod.example.internal 需要在两个地方能解析：
+#
+#   A. 集群内（himarket-server 进程要访问）→ hostAliases
+#   B. 集群外（外部消费者）→ DNS 记录，指向 higress-gateway 的 LoadBalancer/NodePort
+#
+# A 的配置（himarket-server Deployment 的 spec.template.spec.hostAliases）：
+#   注意：merge patch 会整段替换 hostAliases，必须全量重写
+#
+#   kubectl -n himarket get deploy himarket-server -o jsonpath='{.spec.template.spec.hostAliases}'
+#   # 拿到现有内容，把 mcp-prod.example.internal 加进同一个 ip 的 hostnames 列表，再整体 patch
+#
+#   kubectl -n himarket patch deploy himarket-server --type merge -p '{"spec":{"template":{"spec":{"hostAliases":[
+#     {"ip":"<HIMARKET_GW_IP>","hostnames":["qwen3.32b.example.internal","mcp.example.internal","mcp-prod.example.internal","nacos.himarket.svc.cluster.local"]}
+#   ]}}}}'
+#
+# B 的配置：生产环境走正式 DNS，把 mcp-prod.example.internal 指向网关入口。
+#   如果暂时没有 DNS，客户端侧用 hosts 绑定；也可以先只做集群内验证。
+
+# ===========================================================================
+# 第三部分：鉴权（可选，但与 HiMarket 订阅是两层不同的控制）
+# ===========================================================================
+# HiMarket 的订阅控制的是「这个消费者能不能看到这个产品」——它在产品目录层面生效。
+# 网关的 key-auth 控制的是「这个请求能不能到达后端」——它在网络传输层面生效。
+#
+# 两者不重复：
+#   少了网关鉴权 → 任何能在集群内解析到域名的东西都能直接调 MCP，绕过订阅
+#   少了产品订阅 → 用户不知道自己能用什么，没有自助入口
+#
+# 生产建议两层都开。如果只想先跑通，先把下面的插件注释掉。
+#
+# key-auth 的凭据放在 Consumer CR 里：
+# apiVersion: networking.higress.io/v1
+# kind: Consumer
+# metadata:
+#   name: himarket-chat
+#   namespace: himarket
+# spec:
+#   credentials:
+#     - type: key-auth
+#       key: <一个长随机串>          # 客户端放在 x-api-key header 里
+#   name: himarket-chat
+---
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: mcp-key-auth
+  namespace: himarket
+spec:
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/key-auth:1.0.0
+  phase: AUTHN
+  priority: 300
+  # 只对 MCP 的暴露域名生效，不影响模型代理等其他路由
+  matchRules:
+    - ingress:
+        - mcp-prod.example.internal
+  # key-auth 默认从三个位置取凭据，不需要额外配置：
+  #   1. Authorization: Bearer <credential>
+  #   2. x-api-key: <credential>
+  #   3. ?apikey=<credential>
+  defaultConfig:
+    consumers:
+      - name: himarket-chat
+        credential: "REPLACE_WITH_LONG_RANDOM_STRING"   # 建议 32 位以上随机串
+    global_auth: true          # true = 默认拒绝，只有上面配的 consumer 能进
+    allow: []
+
+---
+# 限流：按 consumer 维度限，防止单个 Agent 把后端打满
+# 这里用的是 cluster-key-rate-limit（基于 Redis 的集群级限流）。
+# 如果没有 Redis，改用 local-rate-limit（单实例内存限流，精度差但不依赖外部组件）。
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: mcp-rate-limit
+  namespace: himarket
+spec:
+  url: oci://higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/cluster-key-rate-limit:1.0.0
+  phase: STATS
+  priority: 200
+  matchRules:
+    - ingress:
+        - mcp-prod.example.internal
+  defaultConfig:
+    redis:
+      service_name: redis.himarket.svc.cluster.local
+      service_port: 6379
+      timeout: 1000
+      # password: 从 Secret 注入，不要写明文
+    # MCP 的调用特点：一次对话可能连续多次 tools/call，
+    # 所以阈值要按「工具调用次数」而不是「会话数」估。
+    # 60 次/分钟大约对应 10~15 轮带工具调用的对话。
+    rule_items:
+      - limit_by_per_header: x-api-key      # 按 API Key 计数，等价于按消费者限流
+        limit_keys:
+          - key: "REPLACE_WITH_LONG_RANDOM_STRING"
+            query_per_minute: 60
+        # 未携带 key 的请求由 key-auth 拦下，这里不用重复处理
